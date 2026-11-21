@@ -7017,6 +7017,53 @@ test('with bag selling on, the bag sells before pet loot, so a full bag frees a 
   assert.equal(off.commands.at(-1).kind, 'cos-transfer', 'with bag selling off only pet loot sells, as before');
 });
 
+test('a nearly full bag that nothing in town empties: warned on arrival, pet still sold, then a stop that says why', () => {
+  const gear = (slot, ref) => ({ slot, refObjId: ref, typeFlags: 44 | (6 << 7), quantity: 1, name: 'Blade ' + ref, plus: 0, magic: [], tooltip: { fields: { rarity: 0 } } });
+  const kept = (slot, ref) => ({ slot, refObjId: ref, typeFlags: 108, quantity: 1, name: 'Kept ' + ref });
+  const fill = (f, make) => { const gp = f.World.gp; for (let s = 13; f.World.freeBagSlots() > 1; s++) if (!gp.inventory.some(i => i.slot === s)) gp.inventory.push(make(s, 3000 + s)); };
+  const trip = (f) => {
+    const gp = f.World.gp; f.pet.status = 6; f.pet.inventory = Array.from({ length: 6 }, (_, n) => gear(n, 1100 + n));
+    f.Town.begin(); f.Town.arrived(); f.Town.enter('sell'); gp.target = 62; gp.shop = { npc: 62 };
+    let seen = f.commands.length;
+    for (let n = 0; n < 40 && f.Town.trip?.phase === 'sell'; n++) {
+      f.Town.tick();
+      for (; seen < f.commands.length; seen++) {
+        const c = f.commands[seen];
+        if (c.kind === 'cos-transfer') { const i = f.pet.inventory.find(i => i.slot === c.source); gp.inventory.push({ ...i, slot: c.destination }); f.pet.inventory = f.pet.inventory.filter(x => x !== i); }
+        if (c.kind === 'shop-sell') gp.inventory = gp.inventory.filter(i => i.slot !== c.slot);
+      }
+      f.advance(1000);
+    }
+    assert.equal(f.Town.trip?.phase, 'repair', 'the pet loot sells and the trip carries on'); assert.equal(f.pet.inventory.length, 0);
+    gp.inventory.find(i => i.slot === 6).durability = 10; gp.inventory.find(i => i.slot === 15).quantity = 50;
+    f.Town.leave();
+  };
+  // Bag selling off, a bag of the player's own things: the beko report.
+  const f = townFixture(); f.Town.cfg().sellBag = false; f.Town.cfg().storeSox = false; fill(f, kept);
+  trip(f);
+  assert.ok(f.notices.some(m => /nothing in it is sold or stored/.test(m)), 'warned on arrival');
+  assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false);
+  assert.match(f.Town.message, /Bag still full after town \(1 free slot; it needs 2\)/);
+  assert.match(f.Town.message, /Selling pet loot does not free bag space/);
+  assert.match(f.Town.message, /turn on "Sell ordinary gear from the character bag too"/);
+  // Bag selling on, the same bag: only Sell or Store rules would empty it.
+  const g = townFixture(); g.Town.cfg().sellBag = true; g.Town.cfg().storeSox = false; g.Items.filesLoaded = true; fill(g, kept);
+  trip(g);
+  assert.ok(g.notices.some(m => /nothing in it is sold or stored/.test(m)));
+  assert.match(g.Town.message, /only ordinary Chinese \/ European gear sells from the bag/);
+  // Bag selling on, a bag of plain gear: no warning, the bag sells and the trip walks back.
+  const h = townFixture(); h.Town.cfg().sellBag = true; h.Town.cfg().storeSox = false; h.Items.filesLoaded = true;
+  fill(h, (s, r) => { h.Items.data.set(r, { name: 'Sword', code: 'ITEM_CH_SWORD_01_A' }); return gear(s, r); });
+  trip(h);
+  assert.equal(h.notices.some(m => /nothing in it is sold or stored/.test(m)), false, 'no warning when the bag sells');
+  assert.doesNotMatch(h.Town.message, /stopped/);
+  // A bag item the warehouse takes also counts, and so does a catalogue that has not loaded yet.
+  const k = townFixture(); k.Town.cfg().sellBag = false; fill(k, kept); k.ItemRules.set([3020], { act: 'store' });
+  assert.equal(k.Town.bagClearable(), true);
+  const u = townFixture(); u.Town.cfg().sellBag = true; fill(u, kept); u.Items.filesLoaded = false;
+  assert.equal(u.Town.bagClearable(), true, 'unknown codenames never warn');
+});
+
 test('pet summon scrolls and flutes are never sold, from the pet or the bag, even with a Sell rule', () => {
   const summons = [
     { refObjId: 9000, typeFlags: 12 | (2 << 5) | (1 << 7) | (2 << 11), quantity: 1, name: 'Rabbit summon scroll' },

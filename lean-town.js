@@ -318,6 +318,25 @@ const Town = {
   // pet's loot to pass through on its way to the merchant or the warehouse (the trip used to stop: "free a character bag slot").
   sellsBag() { return !!this.cfg().sellBag || !!Leveling.cfg().on; },
   petClearable(pet) { return pet.rec.inventory.some(i => this.sellable(i) || this.eligible(i)); },
+  // Whether the trip can free a character bag slot from what the bag holds: something it sells, deposits or sells the
+  // surplus of. Pet loot only passes through the bag, so selling it frees nothing. Until the item catalogue has loaded
+  // bag gear cannot be judged, and counts as sellable rather than giving a wrong warning.
+  bagClearable() {
+    const t = this.trip, sellBag = t ? !!t.sellFirst : this.sellsBag();
+    if (sellBag && !Items.filesLoaded) return true;
+    return World.items().some(i => sellBag && this.sellableBag(i) || this.cfg().storage && (this.depositItem(i, true) || this.stone(i))) ||
+      !!(t && this.cfg().sellExcess && this.excess());
+  },
+  // The way out of the final full-bag stop, in the panel's own words.
+  bagHint() {
+    const sellBag = this.trip ? !!this.trip.sellFirst : this.sellsBag();
+    return (sellBag ? 'without a Sell rule only ordinary Chinese / European gear sells from the bag, so add Sell or Store item rules for the rest'
+      : 'turn on "Sell ordinary gear from the character bag too", add Sell or Store item rules') + ', or clear some bag space yourself.';
+  },
+  bagFullStop() {
+    const free = World.freeBagSlots();
+    return `Bag still full after town (${free} free slot${free === 1 ? '' : 's'}; it needs 2). Selling pet loot does not free bag space. To keep looping: ${this.bagHint()}`;
+  },
   autoRevive() { return this.cfg().enabled && this.cfg().revive; },
   // A dead companion waits in the bag as its summoner item with summon state 4; a Grass of life
   // (revival item) brings it back. Both are needed before the town trip is worth starting for this.
@@ -466,6 +485,12 @@ const Town = {
     // With bag selling on, the trip sells first, so a full bag can still make room for refills.
     // A full bag with something of its own the warehouse takes (pet loot needs a free slot first) is not a dead end: the warehouse goes first and makes the room.
     if (full && !t.sellFirst && !(this.cfg().storage && World.items().some(i => this.depositItem(i, true) || this.stone(i)))) return this.fail('Returned to town; free a character bag slot for storage and refills.');
+    // Said up front: a bag that nothing here can empty ends the trip after the services, which otherwise looks like a
+    // stop for no reason once the pet is empty. The trip still runs; the pet loot is worth selling.
+    if (World.freeBagSlots() <= 1 && !this.bagClearable()) {
+      this.message = 'Town: the bag is nearly full and nothing in it is sold or stored, so the trip stops after the services. To keep looping: ' + this.bagHint();
+      Log.warn(this.message); UI.toast(this.message, 'warn', 10000);
+    }
     t.order = this.order(full);
     // A dead pet is brought back first, before the services, so it carries loot again for the rest of the trip.
     if (this.cfg().revivePet && this.deadCollar() && this.grass()) { this.enter('pet-revive'); return; }
@@ -537,7 +562,7 @@ const Town = {
     }
     if (gp.inventoryPending || World.isCasting()) return;
     if (this.supplyShort(t) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
-    if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');
+    if (World.freeBagSlots() <= 1) return this.fail(this.bagFullStop());
     if (!Hunt.cfg().center) return this.fail('No saved hunting spot to walk back to.');
     this.trip = null; Hunt.targetGid = Hunt.lootGid = 0; this.restartClocks();
     // Zero-setup leveling moving to the next town: from here to its world statue instead of back to the spot.
@@ -1139,7 +1164,7 @@ const Town = {
         return true;
       }
       if (this.supplyShort(t) || this.damaged().length || !t.revival && !this.scroll(0x09ec) || !this.scroll(0x19ec)) { this.fail('Final supply, repair or travel-scroll check failed.'); return true; }
-      if (World.freeBagSlots() <= 1) { this.fail('Returned to town; free at least two character bag slots before hunting again.'); return true; }
+      if (World.freeBagSlots() <= 1) { this.fail(this.bagFullStop()); return true; }
       const npc = this.npc('gate');
       if (!npc || gp.target !== npc.gid || !(gp.targetCapabilities & 0x20000000)) { this.fail('Reverse-return teleport NPC unavailable.'); return true; }
       const scroll = this.scroll(0x19ec);
