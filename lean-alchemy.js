@@ -692,8 +692,8 @@ const Alchemy = {
       UI.number('Each Luck / Steady / Immortal / Astral stone to have', () => b().stock.protect, n => b().stock.protect = n, 0, 1000),
       UI.number('Each white stone to have', () => b().stock.white, n => b().stock.white = n, 0, 1000),
       UI.number('Each blue stone to have', () => b().stock.blue, n => b().stock.blue = n, 0, 1000),
-      UI.number('Spend at most this much gold per visit', () => b().spend, n => b().spend = n, 0, 1e12, 100000),
-      UI.number('Always keep this much gold', () => b().keep, n => b().keep = n, 0, 1e12, 100000),
+      UI.gold('Spend at most this much gold per visit', () => b().spend, n => b().spend = n),
+      UI.gold('Always keep this much gold', () => b().keep, n => b().keep = n),
       UI.alchemyBuyList,
       el('p', 'Off by default. With it on, the queue first visits "OpenSRO Alchemy" in Jangan and tops up what the queued items need, at the degree of each item, to the amounts above; when an item runs out on the way, it goes once more before skipping it. It never spends more than the limit per visit or goes below the gold to keep, and it stops when a purchase is not confirmed. Start the queue in Jangan. Only what the merchant sells is bought.', 'muted'));
     UI.pane.append(buy);

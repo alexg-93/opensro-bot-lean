@@ -7,7 +7,7 @@ const ALCHEMY_BUY_STEP_MS = 12000;   // an unconfirmed purchase ends the visit, 
 const ALCHEMY_BUY_OPEN_MS = 15000;
 const ALCHEMY_BUY_NEAR = 200;        // merchant service range, game units
 const ALCHEMY_BUY_STOP = 120;        // walk until this close
-const fmtGold = n => BigInt(n).toLocaleString('en-US');
+const fmtGold = n => goldText(n);
 const AlchemyBuy = {
   run: null, message: '',
   cfg() { return Settings.profile.alchemy.buy; },

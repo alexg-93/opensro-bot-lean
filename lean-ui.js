@@ -1,3 +1,14 @@
+// 100000000 -> "100.000.000".
+function goldText(n) { return String(BigInt(Math.max(0, Math.floor(Number(n) || 0)))).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+// "100.000.000", "100,000,000", "20m", "20kk", "1.5b", "500k" -> a whole number of gold; null when it is not one.
+function parseGold(text) {
+  const t = String(text).trim().toLowerCase().replace(/[\s_']/g, ''), m = /^(\d[\d.,]*)(k{1,3}|m|b)?$/.exec(t);
+  if (!m) return null;
+  const scale = { k: 1e3, kk: 1e6, kkk: 1e9, m: 1e6, b: 1e9 }[m[2]] || 1;
+  // With a short form a dot or comma is a decimal point (1.5m); without one it only separates thousands.
+  const number = m[2] ? Number(m[1].replace(',', '.')) : Number(m[1].replace(/[.,]/g, ''));
+  return Number.isFinite(number) ? Math.round(number * scale) : null;
+}
 function el(tag, text, className = '') {
   const node = document.createElement(tag);
   if (text !== undefined && text !== null) node.textContent = String(text);
@@ -138,6 +149,19 @@ const UI = {
       const valid = clamp(Math.round(value / step) * step, min, max);
       input.value = valid; set(valid); Settings.saveProfile();
     });
+    return this.field(title, input);
+  },
+  // Gold amounts: shown with dots between thousands (100.000.000). Typing takes dots, commas or spaces as separators, and
+  // the short forms players use: 500k, 20m (or 20kk), 1.5b.
+  gold(title, get, set, max = 1e12) {
+    const input = el('input'); input.type = 'text'; input.inputMode = 'numeric'; input.className = 'gold'; input.value = goldText(get());
+    input.addEventListener('focus', () => input.select?.());
+    input.addEventListener('change', () => {
+      const value = parseGold(input.value);
+      if (value === null) { input.value = goldText(get()); return; }
+      const valid = Math.min(max, value); input.value = goldText(valid); set(valid); Settings.saveProfile();
+    });
+    this.refreshers.push(() => { if (this.root?.activeElement !== input) input.value = goldText(get()); });
     return this.field(title, input);
   },
   text(title, get, set, placeholder = 'comma-separated names') {

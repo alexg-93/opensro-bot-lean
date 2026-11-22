@@ -312,3 +312,4 @@ button.queue-row:hover{border-image:none;background:#ffffff12}button.queue-row[a
 @media(min-width:900px){:host(.wide) .pane>fieldset:has(.alchemy-queue){grid-column:1/-1}
 :host(.classic) button.queue-row{height:auto;border:0;background:#0b0b14;color:#fff}:host(.classic) button.queue-row:hover{background:#17173a}
 :host(.classic) button.queue-row[aria-pressed=true]{background:#14204a;outline:1px solid #5b7bff}}
+.field input.gold{width:130px;text-align:right;font-variant-numeric:tabular-nums}

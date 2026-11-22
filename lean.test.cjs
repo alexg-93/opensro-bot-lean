@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Reporter, Live, Alchemy, AlchemyBuy, ALCHEMY_MERCHANT, BuffGear, Icons, Assets, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, Quest, QuestData, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, SellStar, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, AutoLogin, Lure, Search, Nearby, Equip, stopAll, toggleBot, userStop, RunIntent, Retry, PetAttack, MallProbe, MallBuyer, LevelSpot, Leveling, ScrollBuff, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Reporter, Live, Alchemy, AlchemyBuy, ALCHEMY_MERCHANT, goldText, parseGold, BuffGear, Icons, Assets, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, Quest, QuestData, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, SellStar, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, AutoLogin, Lure, Search, Nearby, Equip, stopAll, toggleBot, userStop, RunIntent, Retry, PetAttack, MallProbe, MallBuyer, LevelSpot, Leveling, ScrollBuff, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document, sharedStorage) {
   let time = 100000;
   const storage = sharedStorage || new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -8172,7 +8172,7 @@ test('alchemy buying: the queue first buys within the gold limit, closes the sho
   for (let i = 0; i < 30 && f.AlchemyBuy.run; i++) f.step();
   assert.deepEqual(JSON.parse(JSON.stringify(f.stats.buys)), [{ tab: 0, slot: 1, quantity: 20 }], '20 million buys 20 elixirs, nothing is left for Str');
   assert.equal(f.World.gp.shop, null, 'the shop is closed');
-  assert.ok(f.Alchemy.log.some(l => /^Done buying\. Bought 20 weapon elixir for 20,000,000 gold\. Not bought: weapon elixir \(gold limit\), Str stone \(degree 9\) \(gold limit\)/.test(l.text)));
+  assert.ok(f.Alchemy.log.some(l => /^Done buying\. Bought 20 weapon elixir for 20.000.000 gold\. Not bought: weapon elixir \(gold limit\), Str stone \(degree 9\) \(gold limit\)/.test(l.text)));
   assert.ok(f.Alchemy.queue, 'the queue goes on');
   for (let i = 0; i < 10 && !f.commands.some(c => c.mode === 'reinforce') && !(f.sentLater || []).some(c => c.mode === 'reinforce'); i++) f.step();
   assert.ok((f.sentLater || []).concat(f.commands).some(c => c.kind === 'alchemy-start' && c.mode === 'reinforce'), 'then the first item is enhanced');
@@ -8223,6 +8223,13 @@ test('alchemy buying: an item that runs out buys once more, then is skipped; Sto
   const g = buyFixture(); g.Alchemy.startQueue(); g.step(); assert.ok(g.AlchemyBuy.run);
   g.Alchemy.stop(); for (let i = 0; i < 10 && g.AlchemyBuy.run; i++) g.step();
   assert.equal(g.AlchemyBuy.run, null); assert.equal(g.Alchemy.active(), false);
+});
+test('gold amounts are shown with dots and typed with dots, commas or the short forms', () => {
+  const f = fixture();
+  assert.equal(f.goldText(100000000000), '100.000.000.000'); assert.equal(f.goldText(999), '999'); assert.equal(f.goldText(0), '0');
+  for (const [text, value] of [['100.000.000', 100000000], ['100,000,000', 100000000], ['1 000 000', 1000000], ['20m', 20000000], ['20kk', 20000000],
+    ['1.5b', 1500000000], ['2,5m', 2500000], ['500k', 500000], ['42', 42]]) assert.equal(f.parseGold(text), value, text);
+  for (const text of ['', 'abc', '-5', '5x', 'm']) assert.equal(f.parseGold(text), null, text);
 });
 test('alchemy settings: old saves load with an empty queue, and saved rows get every goal', () => {
   const f = fixture();
