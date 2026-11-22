@@ -31,6 +31,8 @@ const ATTRIBUTE_LABEL = {
 // item's own magic limit caps it), so the value is one of these; each step needs every roll to reach it.
 const ATTRIBUTE_STEPS = [[7, 22], [13, 41], [19, 61], [25, 80], [31, 100]];
 const STONE_FAILED = 0x23;
+// How long an attempt whose run has stopped may stay unconfirmed before the bag settles it (settleStale).
+const ALCHEMY_SETTLE_MS = 5000;
 // Blue (magic) options a stone adds (item type 3,3,11,1, the same "magic" request as the Luck stones). The ids, the values
 // a success can roll and the items each fits come from ALCHEMY_DATA (gen-alchemy.py). A blue already on the item is rolled
 // again on success (it can come out lower); a new one needs a free magic slot, which the Luck/Steady/Immortal/Astral charges
@@ -281,7 +283,8 @@ const Alchemy = {
   // The single-item buttons (and the tests) start a step on the selected item with the tab's own settings.
   startSelected(kind, stonesOnly = false) {
     if (this.run || this.queue) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    this.settleStale();
+    if (this.pending) { this.message = 'The last attempt is still waiting for its result. Try again in a few seconds.'; return UI.toast(this.message, 'warn'); }
     const item = this.item(), reject = text => { this.message = text; UI.toast(text, 'warn'); };
     const blocked = this.blocked(), gp = World.gp; if (blocked) return reject(blocked);
     if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return reject('Wait for known, settled inventory and alchemy state.');
@@ -312,10 +315,15 @@ const Alchemy = {
       if (!this.run) { this.note(reason); this.message = reason; }
     }
     if (this.run) { this.note(reason); this.run = null; this.message = reason; }
-    // Close only a session we opened/used, on the same character. Native close
-    // does not cancel reinforcement; keep the pending result until confirmed.
-    const owner = this.windowOwner; this.windowOwner = null;
-    if (owner && owner.character === World.charName && World.inWorld() && ['reinforce', 'magic', 'attribute'].includes(World.gp?.alchemy?.mode))
+    this.closeOwned();
+  },
+  // Close only a session we opened or used, on the same character, once nothing runs. The native close does not
+  // cancel a sent reinforcement, so an attempt still out is read as before.
+  closeOwned() {
+    const owner = this.windowOwner;
+    if (!owner || this.run || this.queue || AlchemyBuy.run) return;
+    this.windowOwner = null;
+    if (owner.character === World.charName && World.inWorld() && ['reinforce', 'magic', 'attribute'].includes(World.gp?.alchemy?.mode))
       Cmd.raw({ kind: 'alchemy-close' }, 'Close alchemy');
   },
   init() {
@@ -325,6 +333,21 @@ const Alchemy = {
     Hook.observers.push(command => { if (command.kind === 'gameplay' && (this.run || this.queue)) this.stop('Alchemy stopped by manual game control.'); });
     bus.on('game-error', text => { if ((this.run || this.queue) && /alchemy|inventory process/i.test(String(text))) this.stop('Alchemy stopped after a game refusal; wait for the inventory to settle.'); });
     bus.on('reset', () => { this.windowOwner = null; this.stop('Alchemy stopped after world reset.'); this.pending = null; this.selected = null; });
+  },
+  // An attempt the bot could not confirm (an odd result, a stop while it was out, or no answer after 15 s) used to block
+  // every new start until a reload. Once its run has stopped and the game is quiet (no request out, the bag settled, a
+  // few seconds passed), the bag says whether its elixir or stone was used; the attempt is written to the log and
+  // cleared. Nothing is sent again by this: a new start is still the player's.
+  settleStale() {
+    const p = this.pending, gp = World.gp;
+    if (!p || this.run && this.run === p.run || now() - p.at < ALCHEMY_SETTLE_MS) return false;
+    if (!gp || gp.inventoryPending || gp.alchemy?.pending) return false;
+    const material = p.stone || p.elixir, used = !!material && Restock.count(material.ref) < material.before;
+    this.pending = null;
+    const text = used ? 'The last attempt was not confirmed, but its ' + (p.stone ? 'stone' : 'elixir') + ' was used: check the item before you start again.'
+      : 'The last attempt was not carried out: nothing was used. You can start again.';
+    this.note(text); this.message = text;
+    return true;
   },
   observe() {
     const p = this.pending, gp = World.gp, a = gp?.alchemy;
@@ -426,6 +449,7 @@ const Alchemy = {
   },
   tick() {
     this.observe();
+    this.settleStale();
     // A visit to the alchemy merchant owns the character until it ends; the queue waits.
     if (AlchemyBuy.run && !this.run && !this.pending) { AlchemyBuy.tick(); return; }
     // Between two queued steps, the next one starts here and sends its first request in the same tick.
@@ -582,7 +606,8 @@ const Alchemy = {
   },
   startQueue() {
     if (this.run || this.queue) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    this.settleStale();
+    if (this.pending) { this.message = 'The last attempt is still waiting for its result. Try again in a few seconds.'; return UI.toast(this.message, 'warn'); }
     const reject = text => { this.message = text; UI.toast(text, 'warn'); }, rows = this.rows();
     const blocked = this.blocked(); if (blocked) return reject(blocked);
     if (!rows.length) return reject('Add an item from your bag to the queue first.');

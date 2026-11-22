@@ -8404,9 +8404,30 @@ test('alchemy does not accept stale flags or material consumption alone as a res
   f.World.applyGameplay({ ...f.World.gp, inventory: items, alchemy: { ...f.World.gp.alchemy, flags: 0 } });
   f.Controller.tick(); assert.ok(f.Alchemy.pending); assert.equal(f.Alchemy.result.elixirs, 0);
   f.advance(16000); f.Controller.tick(); assert.equal(f.Alchemy.run, null); assert.ok(f.Alchemy.pending);
-  assert.match(f.Alchemy.message, /unconfirmed/); f.Alchemy.start(); assert.equal(f.Alchemy.run, null);
-  f.Controller.tick(); assert.equal(f.commands.filter(c => c.kind === 'alchemy-start').length, 1);
+  assert.match(f.Alchemy.message, /unconfirmed/);
+  f.Controller.tick(); assert.equal(f.commands.filter(c => c.kind === 'alchemy-start').length, 1, 'nothing is sent again');
   assert.equal(f.commands.at(-1).kind, 'alchemy-close');
+  // Once quiet, the bag settles it (the elixir went) and a new start needs no reload.
+  assert.equal(f.Alchemy.pending, null); assert.match(f.Alchemy.message, /not confirmed, but its elixir was used: check the item/);
+  f.Alchemy.select(13); f.Alchemy.start(); assert.ok(f.Alchemy.run, 'Start works again');
+});
+test('an attempt left unconfirmed by a stop or an odd result never blocks the next start', () => {
+  // Stopped while out, and the answer never came: nothing was used, so it is cleared after a few quiet seconds.
+  const f = alchemyFixture(); f.Alchemy.start(); f.Controller.tick(); f.Alchemy.stop();
+  f.Alchemy.start(); assert.equal(f.Alchemy.run, null, 'right after the stop it still waits'); assert.match(f.Alchemy.message, /still waiting for its result/);
+  f.World.applyGameplay({ ...f.World.gp, alchemy: { ...f.World.gp.alchemy, pending: true } });
+  f.advance(6000); f.Controller.tick(); assert.ok(f.Alchemy.pending, 'not while the game still has the request out');
+  f.World.applyGameplay({ ...f.World.gp, alchemy: { ...f.World.gp.alchemy, pending: false } });
+  f.Controller.tick(); assert.equal(f.Alchemy.pending, null); assert.match(f.Alchemy.message, /was not carried out: nothing was used/);
+  f.Alchemy.select(13); f.Alchemy.start(); assert.ok(f.Alchemy.run);
+  // A result the bot does not accept (a plus that jumped two levels) stops the run; the bag then settles it.
+  const g = alchemyFixture(); g.Alchemy.start(); g.Controller.tick(); g.result(0x10, 2);
+  assert.equal(g.Alchemy.run, null); assert.ok(g.Alchemy.pending); assert.match(g.Alchemy.message, /Unexpected enhancement level/);
+  g.advance(6000); g.Controller.tick(); assert.equal(g.Alchemy.pending, null);
+  assert.equal(g.commands.filter(c => c.kind === 'alchemy-start').length, 1, 'nothing was sent again');
+  // The queue starts too.
+  const q = queueFixture(); q.Alchemy.start(); q.Controller.tick(); q.Alchemy.stop(); q.advance(6000); q.Controller.tick();
+  q.Alchemy.startQueue(); assert.ok(q.Alchemy.queue);
 });
 
 test('alchemy waits for pending inventory to settle even after a matching result', () => {

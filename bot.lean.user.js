@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nixxane bot
 // @namespace    https://opensro.online/
-// @version      1.2.283
+// @version      1.2.284
 // @updateURL    https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.meta.js
 // @downloadURL  https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.user.js
 // @description  Combat, reliable looting, potions, restocking and walk-back in one compact panel.
@@ -22,7 +22,7 @@ if (W.__SRO_ASISTAN__ || W.__SRO_LEAN__) {
   console.warn('[NIX] Another SRO assistant is active. Disable it and reload to use NIX.');
   return;
 }
-const VERSION = '1.2.283';
+const VERSION = '1.2.284';
 const APP = { version: VERSION };
 Object.defineProperty(W, '__SRO_LEAN__', { value: APP });
 Object.defineProperty(W, '__SRO_ASISTAN__', { value: APP });
@@ -16896,6 +16896,8 @@ const ATTRIBUTE_LABEL = {
 // item's own magic limit caps it), so the value is one of these; each step needs every roll to reach it.
 const ATTRIBUTE_STEPS = [[7, 22], [13, 41], [19, 61], [25, 80], [31, 100]];
 const STONE_FAILED = 0x23;
+// How long an attempt whose run has stopped may stay unconfirmed before the bag settles it (settleStale).
+const ALCHEMY_SETTLE_MS = 5000;
 // Blue (magic) options a stone adds (item type 3,3,11,1, the same "magic" request as the Luck stones). The ids, the values
 // a success can roll and the items each fits come from ALCHEMY_DATA (gen-alchemy.py). A blue already on the item is rolled
 // again on success (it can come out lower); a new one needs a free magic slot, which the Luck/Steady/Immortal/Astral charges
@@ -17146,7 +17148,8 @@ const Alchemy = {
   // The single-item buttons (and the tests) start a step on the selected item with the tab's own settings.
   startSelected(kind, stonesOnly = false) {
     if (this.run || this.queue) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    this.settleStale();
+    if (this.pending) { this.message = 'The last attempt is still waiting for its result. Try again in a few seconds.'; return UI.toast(this.message, 'warn'); }
     const item = this.item(), reject = text => { this.message = text; UI.toast(text, 'warn'); };
     const blocked = this.blocked(), gp = World.gp; if (blocked) return reject(blocked);
     if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return reject('Wait for known, settled inventory and alchemy state.');
@@ -17177,10 +17180,15 @@ const Alchemy = {
       if (!this.run) { this.note(reason); this.message = reason; }
     }
     if (this.run) { this.note(reason); this.run = null; this.message = reason; }
-    // Close only a session we opened/used, on the same character. Native close
-    // does not cancel reinforcement; keep the pending result until confirmed.
-    const owner = this.windowOwner; this.windowOwner = null;
-    if (owner && owner.character === World.charName && World.inWorld() && ['reinforce', 'magic', 'attribute'].includes(World.gp?.alchemy?.mode))
+    this.closeOwned();
+  },
+  // Close only a session we opened or used, on the same character, once nothing runs. The native close does not
+  // cancel a sent reinforcement, so an attempt still out is read as before.
+  closeOwned() {
+    const owner = this.windowOwner;
+    if (!owner || this.run || this.queue || AlchemyBuy.run) return;
+    this.windowOwner = null;
+    if (owner.character === World.charName && World.inWorld() && ['reinforce', 'magic', 'attribute'].includes(World.gp?.alchemy?.mode))
       Cmd.raw({ kind: 'alchemy-close' }, 'Close alchemy');
   },
   init() {
@@ -17190,6 +17198,21 @@ const Alchemy = {
     Hook.observers.push(command => { if (command.kind === 'gameplay' && (this.run || this.queue)) this.stop('Alchemy stopped by manual game control.'); });
     bus.on('game-error', text => { if ((this.run || this.queue) && /alchemy|inventory process/i.test(String(text))) this.stop('Alchemy stopped after a game refusal; wait for the inventory to settle.'); });
     bus.on('reset', () => { this.windowOwner = null; this.stop('Alchemy stopped after world reset.'); this.pending = null; this.selected = null; });
+  },
+  // An attempt the bot could not confirm (an odd result, a stop while it was out, or no answer after 15 s) used to block
+  // every new start until a reload. Once its run has stopped and the game is quiet (no request out, the bag settled, a
+  // few seconds passed), the bag says whether its elixir or stone was used; the attempt is written to the log and
+  // cleared. Nothing is sent again by this: a new start is still the player's.
+  settleStale() {
+    const p = this.pending, gp = World.gp;
+    if (!p || this.run && this.run === p.run || now() - p.at < ALCHEMY_SETTLE_MS) return false;
+    if (!gp || gp.inventoryPending || gp.alchemy?.pending) return false;
+    const material = p.stone || p.elixir, used = !!material && Restock.count(material.ref) < material.before;
+    this.pending = null;
+    const text = used ? 'The last attempt was not confirmed, but its ' + (p.stone ? 'stone' : 'elixir') + ' was used: check the item before you start again.'
+      : 'The last attempt was not carried out: nothing was used. You can start again.';
+    this.note(text); this.message = text;
+    return true;
   },
   observe() {
     const p = this.pending, gp = World.gp, a = gp?.alchemy;
@@ -17291,6 +17314,7 @@ const Alchemy = {
   },
   tick() {
     this.observe();
+    this.settleStale();
     // A visit to the alchemy merchant owns the character until it ends; the queue waits.
     if (AlchemyBuy.run && !this.run && !this.pending) { AlchemyBuy.tick(); return; }
     // Between two queued steps, the next one starts here and sends its first request in the same tick.
@@ -17447,7 +17471,8 @@ const Alchemy = {
   },
   startQueue() {
     if (this.run || this.queue) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    this.settleStale();
+    if (this.pending) { this.message = 'The last attempt is still waiting for its result. Try again in a few seconds.'; return UI.toast(this.message, 'warn'); }
     const reject = text => { this.message = text; UI.toast(text, 'warn'); }, rows = this.rows();
     const blocked = this.blocked(); if (blocked) return reject(blocked);
     if (!rows.length) return reject('Add an item from your bag to the queue first.');
@@ -17884,7 +17909,7 @@ const AlchemyBuy = {
 const ALCHEMY_MERCHANT = { name: /alchemy/i, refObjId: 0, regionId: 0, x: 0, y: 0, z: 0 };
 
 
-const RELEASE_NOTES = [{"version": "1.2.283", "title": "Gold amounts with dots", "items": ["Gold fields now show dots between thousands, like 100.000.000, so big amounts are easy to read.", "You can type them with dots, commas or spaces, or short: 500k, 20m (or 20kk), 1.5b.", "Used for the alchemy buying limits, the leveling gold to keep and stall prices. The alchemy log shows gold the same way."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.282", "title": "Alchemy queue buys its own elixirs and stones", "items": ["New in the Alchemy tab: \"Buy what the queue needs\". Off by default, because it spends gold.", "With it on, the queue first visits \"OpenSRO Alchemy\" in Jangan and buys what the queued items need at their degree: elixirs, lucky powder, Luck/Steady/Immortal/Astral, white and blue stones.", "You set how many of each to have in the bag, the most gold one visit may spend (20 million by default) and the gold it always keeps (1 million by default).", "When an item runs out on the way, the queue goes to the merchant once more before skipping that item.", "Only what the merchant sells is bought. Every purchase is confirmed by the bag; one that is not confirmed is never sent again.", "Start the queue in Jangan. The bot remembers where it saw the merchant, so later it walks there from anywhere in town."], "note": "Tested in simulation only. This is the first version that buys from that merchant; try it with a small gold limit first."}, {"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.278", "title": "A full bag now says why the town trip stops", "items": ["When the character bag is nearly full and nothing in it can be sold or stored, the trip now warns you on arrival in town. It still sells the pet's loot, then stops before walking back, as before.", "The stop message now explains why: selling pet loot does not free bag space, because the loot only passes through one bag slot. It also tells you what to change: turn on \"Sell ordinary gear from the character bag too\", add Sell or Store item rules, or clear some bag space.", "With bag selling already on, it reminds you that only ordinary Chinese / European gear sells from the bag without a Sell rule."], "note": "Only the messages changed; the trip itself works as before. Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.277", "title": "Start and stop characters from the live dashboard", "items": ["New setting on the Settings page, under Live dashboard: \"Allow Start and Stop from the dashboard\". Off by default, set per character.", "When it is on, that character's dashboard card gets a Start or Stop button, and Start all / Stop all sit at the top and ask before acting.", "Stop does the same as Stop all in the bot panel, so it also cancels auto-start. Start only acts while the bot is stopped, so a late Start never stops a running bot.", "The command reaches the game with the character's next report (about every 10 seconds). A command older than 90 seconds is ignored, so a bot that comes back later does not act on an old one.", "Anyone with your dashboard link can start and stop the characters that allow it, so keep the link private."], "note": "Contributed by alexg-93 (#111). Tested with the integration, hub and dashboard test suites and in a live game from a phone using the self-hosted hub; not tested on a deployed Cloudflare Worker."}, {"version": "1.2.276", "title": "Optional auto-login after a server restart", "items": ["New setting under Behaviour: \"Log in again by itself after a server restart\". Off by default.", "While it is on, the bot remembers the ID, password and server of your next login on the game's login screen. When a disconnect ends with you signed out, it logs in again, enters the same character and carries on hunting.", "Turned on while already in game? Log out and log in once so it can remember the login.", "The login is kept unencrypted in this browser's storage for the site; anyone using the same browser profile can read it. Turning the setting off forgets it. It never goes into logs, diagnostics, reports or shared profiles.", "If the server refuses the login three times (wrong password, for example) it stops and waits for you; a server that is still restarting is tried again every few minutes."], "note": "Tested with the integration suite against simulated game states; a real server restart has not been exercised yet."}];
+const RELEASE_NOTES = [{"version": "1.2.284", "title": "No more reload after an unconfirmed alchemy attempt", "items": ["Fixed: after an alchemy attempt the bot could not confirm, it said \"Previous attempt is unconfirmed\" on every start until you reloaded the page.", "Now, a few seconds after such an attempt, once the game is quiet, the bot checks the bag. If its elixir or stone was used, the log says so and asks you to check the item; if nothing was used, it says the attempt was not carried out. Either way you can start again without a reload.", "The bot still never sends an attempt again by itself."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.283", "title": "Gold amounts with dots", "items": ["Gold fields now show dots between thousands, like 100.000.000, so big amounts are easy to read.", "You can type them with dots, commas or spaces, or short: 500k, 20m (or 20kk), 1.5b.", "Used for the alchemy buying limits, the leveling gold to keep and stall prices. The alchemy log shows gold the same way."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.282", "title": "Alchemy queue buys its own elixirs and stones", "items": ["New in the Alchemy tab: \"Buy what the queue needs\". Off by default, because it spends gold.", "With it on, the queue first visits \"OpenSRO Alchemy\" in Jangan and buys what the queued items need at their degree: elixirs, lucky powder, Luck/Steady/Immortal/Astral, white and blue stones.", "You set how many of each to have in the bag, the most gold one visit may spend (20 million by default) and the gold it always keeps (1 million by default).", "When an item runs out on the way, the queue goes to the merchant once more before skipping that item.", "Only what the merchant sells is bought. Every purchase is confirmed by the bag; one that is not confirmed is never sent again.", "Start the queue in Jangan. The bot remembers where it saw the merchant, so later it walks there from anywhere in town."], "note": "Tested in simulation only. This is the first version that buys from that merchant; try it with a small gold limit first."}, {"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.278", "title": "A full bag now says why the town trip stops", "items": ["When the character bag is nearly full and nothing in it can be sold or stored, the trip now warns you on arrival in town. It still sells the pet's loot, then stops before walking back, as before.", "The stop message now explains why: selling pet loot does not free bag space, because the loot only passes through one bag slot. It also tells you what to change: turn on \"Sell ordinary gear from the character bag too\", add Sell or Store item rules, or clear some bag space.", "With bag selling already on, it reminds you that only ordinary Chinese / European gear sells from the bag without a Sell rule."], "note": "Only the messages changed; the trip itself works as before. Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.277", "title": "Start and stop characters from the live dashboard", "items": ["New setting on the Settings page, under Live dashboard: \"Allow Start and Stop from the dashboard\". Off by default, set per character.", "When it is on, that character's dashboard card gets a Start or Stop button, and Start all / Stop all sit at the top and ask before acting.", "Stop does the same as Stop all in the bot panel, so it also cancels auto-start. Start only acts while the bot is stopped, so a late Start never stops a running bot.", "The command reaches the game with the character's next report (about every 10 seconds). A command older than 90 seconds is ignored, so a bot that comes back later does not act on an old one.", "Anyone with your dashboard link can start and stop the characters that allow it, so keep the link private."], "note": "Contributed by alexg-93 (#111). Tested with the integration, hub and dashboard test suites and in a live game from a phone using the self-hosted hub; not tested on a deployed Cloudflare Worker."}];
 
 // Check trusted repository metadata; never execute downloaded update code.
 const Updates = {
