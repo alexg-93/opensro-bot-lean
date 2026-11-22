@@ -1949,7 +1949,7 @@ test('a live application is accepted even when the local listing record is missi
     g.Controller.tick(); assert.equal(g.commands.length, 0);
   }
 });
-test('resurrection offers are accepted only from party members while dead, never mutation offers', () => {
+test('resurrection offers are accepted only from party members while dead, beast form only with its switch on', () => {
   const setup = (change = {}) => {
     const f = fixture(); f.Settings.profile.party.acceptRes = true; f.World.isDead = () => true;
     f.World.ents.set(77, { gid: 77, kind: 'player', name: 'Healer' }); f.World.ents.set(78, { gid: 78, kind: 'player', name: 'Stranger' });
@@ -1960,7 +1960,11 @@ test('resurrection offers are accepted only from party members while dead, never
   let f = setup(); assert.equal(f.Hunt.running, false); f.Controller.tick();
   assert.deepEqual(JSON.parse(JSON.stringify(answers(f))), [{ kind: 'resurrection-consent', accept: true }], 'answered with hunting stopped');
   f = setup({ resurrection: { gid: 78 } }); f.Controller.tick(); assert.equal(answers(f).length, 0);
-  f = setup({ resurrection: { gid: 77, mutation: true } }); f.Controller.tick(); assert.equal(answers(f).length, 0);
+  f = setup({ resurrection: { gid: 77, mutation: true } }); assert.equal(f.Settings.profile.party.acceptBeast, true, 'on by default');
+  f.Controller.tick(); assert.deepEqual(answers(f).map(a => a.accept), [true], 'a beast-form revival from a party member is accepted');
+  assert.ok(f.notices.some(n => /beast form/.test(n)));
+  f = setup({ resurrection: { gid: 77, mutation: true } }); f.Settings.profile.party.acceptBeast = false; f.Controller.tick(); assert.equal(answers(f).length, 0, 'switch off: left to the player');
+  f = setup({ resurrection: { gid: 78, mutation: true } }); f.Controller.tick(); assert.equal(answers(f).length, 0, 'a stranger\'s beast form is not answered');
   f = setup({ resurrection: { gid: 999 } }); f.Controller.tick(); assert.equal(answers(f).length, 0);
   f = setup(); f.World.isDead = () => false; f.Controller.tick(); assert.equal(answers(f).length, 0);
   f = setup(); f.Settings.profile.party.acceptRes = false; f.Controller.tick(); assert.equal(answers(f).length, 0);
@@ -5178,6 +5182,15 @@ test('with Accept resurrection on and a helper in view the bot waits before revi
   t = deathFixture('revive'); t.f.World.ents.set(77, { gid: 77, kind: 'player', name: 'Healer', appearanceState: [2] }); t.die(); t.f.advance(6000); t.f.Controller.tick();
   assert.equal(rebirths(t.f), 1, 'a dead helper cannot resurrect us');
   t = deathFixture('revive'); t.f.Settings.profile.party.acceptRes = false; t.die(); t.offer(); t.f.advance(6000); t.f.Controller.tick(); assert.equal(rebirths(t.f), 0, 'an open resurrection offer is never answered by reviving');
+});
+test('an offer the bot leaves alone (beast form switched off) never keeps the character dead', () => {
+  const rebirths = f => f.commands.filter(c => c.kind === 'rebirth').length;
+  const t = deathFixture('revive'); t.f.Settings.profile.party.acceptBeast = false; t.die();
+  t.f.World.gp.social = { ...t.f.World.gp.social, resurrection: { gid: 77, mutation: true } };
+  assert.equal(t.f.Party.resBusy(), false);
+  t.f.advance(25000); t.f.Controller.tick();
+  assert.equal(t.f.commands.filter(c => c.kind === 'resurrection-consent').length, 0, 'the beast-form question is not answered');
+  assert.equal(rebirths(t.f), 1, 'the bot revives itself after the usual wait instead of staying dead');
 });
 test('the wait for a party resurrection before reviving in town is configurable', () => {
   const rebirths = f => f.commands.filter(c => c.kind === 'rebirth').length;

@@ -166,8 +166,21 @@ const Party = {
     const wait = this.reviveDelay();
     return wait > 5000 ? `waiting ${Math.round(wait / 1000)} s for a party member to resurrect before reviving.` : 'no party member in view, reviving in 5 s.';
   },
-  // Never revive while an offer is open or an acceptance was just sent.
-  resBusy() { return !!World.gp?.social?.resurrection || now() - this.consentAt < 4000; },
+  // The open resurrection question when the bot will answer it: dead, Accept resurrection on, cast by a party member,
+  // and a beast-form one (mutation, an rmut skill) only with that switch on. Anything else is left to the player.
+  answerable() {
+    const c = Settings.profile.party, social = World.gp?.social, question = social?.resurrection;
+    if (!question || !c.acceptRes || question.mutation && !c.acceptBeast || !Array.isArray(social.members)) return null;
+    const caster = World.ents.get(question.gid);
+    return caster?.name && social.members.some(m => m?.name === caster.name && m.name !== social.localName) ? { question, caster } : null;
+  },
+  // Never revive while an offer is open or an acceptance was just sent. With Accept resurrection off every open offer is
+  // the player's to answer. With it on, an offer the bot leaves alone (a stranger's, or beast form with that switch off)
+  // must not hold the revive back: nobody would ever answer it and the character would stay dead.
+  resBusy() {
+    const question = World.gp?.social?.resurrection;
+    return !!question && (!Settings.profile.party.acceptRes || !!this.answerable()) || now() - this.consentAt < 4000;
+  },
   resumeTick() {
     const r = this.resumeHunt;
     if (this.huntAtDeath && now() - this.huntAtDeath.at > 15 * 60000) this.huntAtDeath = null;
@@ -185,7 +198,8 @@ const Party = {
     Controller.resumeHunting('Resurrected');
   },
   // A dead character gets a Yes/No resurrection question from a caster's Rebirth skill. Only party members
-  // are answered, and only while dead; other questions (including mutation proposals) are left to the player.
+  // are answered, and only while dead (answerable); a beast-form revival (mutation proposal, 0x3393 type 8) only
+  // with "Also accept beast-form resurrection" on. Other questions are left to the player.
   // When town is needed (townNeeds, only with "Revive in town" on) the offer is answered No, as the game's own No
   // button does (client ui.ts sends resurrection-consent with accept false; the worker then drops the question), and the
   // character revives in town: by the death handling while hunting, here (after the usual 5 s) while stopped, since
@@ -202,9 +216,9 @@ const Party = {
     if (this.declinedAt && !question) this.declinedAt = 0;
     const needs = this.declineFailed ? [] : this.townNeeds();
     if (needs.length && !Hunt.running) this.reviveInTown();
-    if (!question || question.mutation || !Array.isArray(social.members)) return;
-    const caster = World.ents.get(question.gid);
-    if (!caster?.name || !social.members.some(m => m?.name === caster.name && m.name !== social.localName)) return;
+    const offer = this.answerable();
+    if (!offer) return;
+    const { caster } = offer, beast = offer.question.mutation ? ' (beast form)' : '';
     if (!Cmd.spaced('resurrection-consent')) return;
     if (needs.length) {
       if (this.declinedAt) return;
@@ -215,10 +229,10 @@ const Party = {
       }
       return;
     }
-    if (Cmd.raw({ kind: 'resurrection-consent', accept: true }, 'Accept resurrection from ' + caster.name)) {
+    if (Cmd.raw({ kind: 'resurrection-consent', accept: true }, 'Accept resurrection' + beast + ' from ' + caster.name)) {
       this.consentAt = now();
       this.resumeHunt = this.huntAtDeath && !Hunt.running && now() - this.huntAtDeath.at < 15 * 60000 ? { at: now() } : null;
-      UI.toast('Accepted resurrection from ' + caster.name, 'info', 3000);
+      UI.toast('Accepted resurrection' + beast + ' from ' + caster.name, 'info', 3000);
     }
   },
   reviveInTown() {
