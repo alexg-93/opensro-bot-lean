@@ -15,7 +15,12 @@ const DEFAULT_PROFILE = {
     blue: { targets: {}, limit: 100 },
     // The alchemy queue (lean-alchemy.js): items done one after another, each with its own goals (the fields above, copied
     // when the item is added). onMissing: 'next' moves on when an item runs out of materials, 'stop' stops the queue.
-    queue: [], delay: 1000, onMissing: 'next', queueSound: false },
+    queue: [], delay: 1000, onMissing: 'next', queueSound: false,
+    // Buying what the queue needs at the Jangan alchemy merchant (lean-alchemy-buy.js). Off by default: it spends gold.
+    // stock: how many of each to have in the bag after a visit. spend: the most gold one visit may spend; keep: gold never spent.
+    buy: { on: false, stock: { elixir: 50, powder: 30, protect: 6, white: 20, blue: 20 }, spend: 20000000, keep: 1000000,
+      // Where the merchant was last seen (filled in by the bot): { refObjId, regionId, x, y, z }.
+      merchant: null } },
   statPoints: { enabled: false, str: 1, int: 0, reserve: 0 },
   // Zero-setup leveling (lean-leveling.js): spots from the game data and NPC gear upgrades.
   leveling: { on: false, spots: true, gear: true, accessories: true, sellOld: true, move: true, reserve: 5000, skills: true, prepared: '', added: [], elements: '', imbued: [], pet: '', build: 'auto', weapon: null },
@@ -157,6 +162,11 @@ function botProfile(input) {
   if (!Number.isInteger(result.alchemy.delay)) result.alchemy.delay = DEFAULT_PROFILE.alchemy.delay;
   result.alchemy.delay = Math.min(10000, Math.max(500, result.alchemy.delay));
   if (!['next', 'stop'].includes(result.alchemy.onMissing)) result.alchemy.onMissing = 'next';
+  const buy = result.alchemy.buy, whole = (n, max, fallback) => Number.isInteger(n) && n >= 0 ? Math.min(max, n) : fallback;
+  buy.on = buy.on === true;
+  const m = buy.merchant; buy.merchant = m && Number.isInteger(m.refObjId) && Number.isInteger(m.regionId) && [m.x, m.y, m.z].every(Number.isFinite) ? { refObjId: m.refObjId, regionId: m.regionId, x: m.x, y: m.y, z: m.z } : null;
+  for (const key of Object.keys(DEFAULT_PROFILE.alchemy.buy.stock)) buy.stock[key] = whole(buy.stock[key], 1000, DEFAULT_PROFILE.alchemy.buy.stock[key]);
+  buy.spend = whole(buy.spend, 1e12, DEFAULT_PROFILE.alchemy.buy.spend); buy.keep = whole(buy.keep, 1e12, DEFAULT_PROFILE.alchemy.buy.keep);
   // A character wears one shield: the old primary and secondary shield become that one, the primary first.
   const gear = result.items.gear, oldGear = input.items?.gear;
   if (oldGear && typeof oldGear === 'object' && !('shield' in oldGear)) gear.shield = [oldGear.primaryShield, oldGear.secondaryShield].find(k => typeof k === 'string' && k) || null;

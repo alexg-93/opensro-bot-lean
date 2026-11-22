@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nixxane bot
 // @namespace    https://opensro.online/
-// @version      1.2.281
+// @version      1.2.282
 // @updateURL    https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.meta.js
 // @downloadURL  https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.user.js
 // @description  Combat, reliable looting, potions, restocking and walk-back in one compact panel.
@@ -22,7 +22,7 @@ if (W.__SRO_ASISTAN__ || W.__SRO_LEAN__) {
   console.warn('[NIX] Another SRO assistant is active. Disable it and reload to use NIX.');
   return;
 }
-const VERSION = '1.2.281';
+const VERSION = '1.2.282';
 const APP = { version: VERSION };
 Object.defineProperty(W, '__SRO_LEAN__', { value: APP });
 Object.defineProperty(W, '__SRO_ASISTAN__', { value: APP });
@@ -199,7 +199,12 @@ const DEFAULT_PROFILE = {
     blue: { targets: {}, limit: 100 },
     // The alchemy queue (lean-alchemy.js): items done one after another, each with its own goals (the fields above, copied
     // when the item is added). onMissing: 'next' moves on when an item runs out of materials, 'stop' stops the queue.
-    queue: [], delay: 1000, onMissing: 'next', queueSound: false },
+    queue: [], delay: 1000, onMissing: 'next', queueSound: false,
+    // Buying what the queue needs at the Jangan alchemy merchant (lean-alchemy-buy.js). Off by default: it spends gold.
+    // stock: how many of each to have in the bag after a visit. spend: the most gold one visit may spend; keep: gold never spent.
+    buy: { on: false, stock: { elixir: 50, powder: 30, protect: 6, white: 20, blue: 20 }, spend: 20000000, keep: 1000000,
+      // Where the merchant was last seen (filled in by the bot): { refObjId, regionId, x, y, z }.
+      merchant: null } },
   statPoints: { enabled: false, str: 1, int: 0, reserve: 0 },
   // Zero-setup leveling (lean-leveling.js): spots from the game data and NPC gear upgrades.
   leveling: { on: false, spots: true, gear: true, accessories: true, sellOld: true, move: true, reserve: 5000, skills: true, prepared: '', added: [], elements: '', imbued: [], pet: '', build: 'auto', weapon: null },
@@ -341,6 +346,11 @@ function botProfile(input) {
   if (!Number.isInteger(result.alchemy.delay)) result.alchemy.delay = DEFAULT_PROFILE.alchemy.delay;
   result.alchemy.delay = Math.min(10000, Math.max(500, result.alchemy.delay));
   if (!['next', 'stop'].includes(result.alchemy.onMissing)) result.alchemy.onMissing = 'next';
+  const buy = result.alchemy.buy, whole = (n, max, fallback) => Number.isInteger(n) && n >= 0 ? Math.min(max, n) : fallback;
+  buy.on = buy.on === true;
+  const m = buy.merchant; buy.merchant = m && Number.isInteger(m.refObjId) && Number.isInteger(m.regionId) && [m.x, m.y, m.z].every(Number.isFinite) ? { refObjId: m.refObjId, regionId: m.regionId, x: m.x, y: m.y, z: m.z } : null;
+  for (const key of Object.keys(DEFAULT_PROFILE.alchemy.buy.stock)) buy.stock[key] = whole(buy.stock[key], 1000, DEFAULT_PROFILE.alchemy.buy.stock[key]);
+  buy.spend = whole(buy.spend, 1e12, DEFAULT_PROFILE.alchemy.buy.spend); buy.keep = whole(buy.keep, 1e12, DEFAULT_PROFILE.alchemy.buy.keep);
   // A character wears one shield: the old primary and secondary shield become that one, the primary first.
   const gear = result.items.gear, oldGear = input.items?.gear;
   if (oldGear && typeof oldGear === 'object' && !('shield' in oldGear)) gear.shield = [oldGear.primaryShield, oldGear.secondaryShield].find(k => typeof k === 'string' && k) || null;
@@ -17159,6 +17169,7 @@ const Alchemy = {
   },
   delay() { return Math.min(10000, Math.max(500, Math.floor(Number(this.cfg().delay)) || 1000)); },
   stop(reason = 'Alchemy stopped. An attempt already sent may still finish.') {
+    if (AlchemyBuy.run) AlchemyBuy.end('Buying stopped.');
     if (this.queue) {
       const q = this.queue; this.queue = null;
       if (this.run?.queued) this.addTotals(q.totals, this.run);
@@ -17280,6 +17291,8 @@ const Alchemy = {
   },
   tick() {
     this.observe();
+    // A visit to the alchemy merchant owns the character until it ends; the queue waits.
+    if (AlchemyBuy.run && !this.run && !this.pending) { AlchemyBuy.tick(); return; }
     // Between two queued steps, the next one starts here and sends its first request in the same tick.
     if (!this.run && this.queue && !this.pending) this.queueTick();
     const r = this.run, gp = World.gp;
@@ -17380,7 +17393,7 @@ const Alchemy = {
     return this.rows().some(row => row.slot === item.slot && row.refObjId === item.refObjId);
   },
   // Anything alchemy owns right now: a step, an unconfirmed result, or a queue between two steps.
-  active() { return !!(this.run || this.pending || this.queue); },
+  active() { return !!(this.run || this.pending || this.queue || AlchemyBuy.run); },
   //============================================================================
   // The queue: items done one after another. Each row is { refObjId, slot, goals } in Settings (goals as alchemyGoals());
   // the bot does Plus, then White, then Blue on it, then the next row. A step reuses the single-item code with the row's goals.
@@ -17442,15 +17455,29 @@ const Alchemy = {
     for (const row of rows) this.rowStatus.set(row, 'Waiting');
     this.result = this.queue.totals; this.message = 'Queue started.';
     this.note(`Queue started: ${rows.length} item${rows.length > 1 ? 's' : ''}.`);
+    this.buyFor(rows);
+  },
+  // With buying on, a visit to the alchemy merchant for what `rows` still need. True when one started.
+  buyFor(rows) {
+    if (!this.cfg().buy?.on) return false;
+    const error = AlchemyBuy.start(rows, () => { if (this.queue) this.queue.nextAt = now() + this.delay(); });
+    if (error && error !== 'Nothing to buy.') this.note('Not buying: ' + error);
+    return !error;
   },
   // Between steps: pick the next step with something to do on the current row and start it.
   queueTick() {
     const q = this.queue, blocked = this.blocked();
+    // Just after a merchant visit the shop is still closing and the last step may still be settling: wait a little.
+    if (blocked && /^(Wait for combat and movement|Close shop)/.test(blocked) && !Hunt.underAttack()) {
+      q.blockedSince ||= now(); this.message = blocked;
+      if (now() - q.blockedSince < 10000) return;
+    }
+    q.blockedSince = 0;
     if (blocked || q.character !== World.charName || q.manualAt !== Manual.lastAt) return this.stop(blocked || 'Alchemy stopped: character or manual control changed.');
     if (!this.rows().includes(q.row)) return this.stop('Alchemy stopped: the queue changed.');
     if (now() < q.nextAt) return;
     const item = this.rowItem(q.row);
-    if (!item) return this.queueMissing(`not in bag slot ${q.row.slot} any more`);
+    if (!item) return this.queueMissing(`not in bag slot ${q.row.slot} any more`, false);
     for (let i = QUEUE_STEPS.indexOf(q.step); i < QUEUE_STEPS.length; i++) {
       const step = QUEUE_STEPS[i]; q.step = step;
       if (!this.stepWanted(step, item, q.row.goals)) continue;
@@ -17475,8 +17502,14 @@ const Alchemy = {
     this.rowStatus.set(q.row, STEP_LABEL[q.step] + ' done'); q.nextAt = now() + this.delay();
     if (next < QUEUE_STEPS.length) q.step = QUEUE_STEPS[next]; else this.rowDone();
   },
-  queueMissing(reason) {
+  queueMissing(reason, buyable = true) {
     const q = this.queue, name = this.rowName(q.row), text = reason.charAt(0).toUpperCase() + reason.slice(1);
+    // Once per item: buy what it and the items after it need, then try the same step again.
+    if (buyable && q.boughtFor !== q.row) {
+      q.boughtFor = q.row;
+      const rows = this.rows();
+      if (this.buyFor(rows.slice(rows.indexOf(q.row)))) { this.rowStatus.set(q.row, 'Buying materials'); this.note(`${name}: ${text} Buying more.`); return; }
+    }
     if (this.cfg().onMissing === 'stop') return this.stop(`${name}: ${text}`);
     this.rowStatus.set(q.row, 'Skipped: ' + text); q.skipped++;
     this.note(`${name} skipped: ${text}`); this.nextRow();
@@ -17515,6 +17548,20 @@ const Alchemy = {
       el('p', 'Each item gets Plus, then White, then Blue, then the next item starts. Blues come last because a white stone that works can roll a blue again. A step with no goal is passed over. Stop hunting and travel first; Stop prevents the next attempt, a sent one may still finish.', 'muted'));
     UI.alchemyNote = el('p', '', 'muted'); queue.append(UI.alchemyNote);
     UI.pane.append(queue);
+    // Buying at the Jangan alchemy merchant
+    const b = () => c().buy, buy = UI.group('Buy at the Jangan alchemy merchant');
+    UI.alchemyBuyList = el('p', '', 'muted');
+    buy.append(UI.check('Buy what the queue needs (spends gold)', () => b().on, v => b().on = v),
+      UI.number('Elixirs to have', () => b().stock.elixir, n => b().stock.elixir = n, 0, 1000),
+      UI.number('Lucky powder to have', () => b().stock.powder, n => b().stock.powder = n, 0, 1000),
+      UI.number('Each Luck / Steady / Immortal / Astral stone to have', () => b().stock.protect, n => b().stock.protect = n, 0, 1000),
+      UI.number('Each white stone to have', () => b().stock.white, n => b().stock.white = n, 0, 1000),
+      UI.number('Each blue stone to have', () => b().stock.blue, n => b().stock.blue = n, 0, 1000),
+      UI.number('Spend at most this much gold per visit', () => b().spend, n => b().spend = n, 0, 1e12, 100000),
+      UI.number('Always keep this much gold', () => b().keep, n => b().keep = n, 0, 1e12, 100000),
+      UI.alchemyBuyList,
+      el('p', 'Off by default. With it on, the queue first visits "OpenSRO Alchemy" in Jangan and tops up what the queued items need, at the degree of each item, to the amounts above; when an item runs out on the way, it goes once more before skipping it. It never spends more than the limit per visit or goes below the gold to keep, and it stops when a purchase is not confirmed. Start the queue in Jangan. Only what the merchant sells is bought.', 'muted'));
+    UI.pane.append(buy);
     // Goals of the selected row
     const goals = UI.group('Goals'), tabs = el('div', null, 'subtabs');
     UI.goalsTitle = el('p', '', 'muted');
@@ -17614,7 +17661,11 @@ const Alchemy = {
     if (!UI.is('Alchemy') || !UI.alchemyNote) return;
     const { row, item, goals: c } = this.editing(), r = this.stats(), q = this.queue;
     const fmt = n => !Number.isFinite(n) ? 'a huge number of' : n < 100 ? n.toFixed(n < 10 ? 1 : 0) : n < 1e6 ? Math.round(n).toLocaleString('en-US') : n.toExponential(1);
-    UI.alchemyNote.textContent = this.message + (q?.row ? `\nQueue: item ${this.rows().indexOf(q.row) + 1} of ${this.rows().length} · ${STEP_LABEL[q.step]} · ${q.done} done` + (q.skipped ? ` · ${q.skipped} skipped` : '') : '');
+    if (UI.alchemyBuyList?.isConnected) {
+      const list = AlchemyBuy.shortfall(this.rows());
+      UI.alchemyBuyList.textContent = AlchemyBuy.run ? AlchemyBuy.message : list.length ? 'Would buy now: ' + list.map(n => `${n.missing} ${n.label}`).join(', ') + '.' : 'Nothing to buy for the queue right now.';
+    }
+    UI.alchemyNote.textContent = (AlchemyBuy.run ? AlchemyBuy.message : this.message) + (q?.row ? `\nQueue: item ${this.rows().indexOf(q.row) + 1} of ${this.rows().length} · ${STEP_LABEL[q.step]} · ${q.done} done` + (q.skipped ? ` · ${q.skipped} skipped` : '') : '');
     // The queue lines show live plus values and statuses, so they are rebuilt when any of that changes.
     const queueKey = JSON.stringify([this.editRow, q?.step, this.rows().indexOf(q?.row), !!this.run, ...this.rows().map(x => { const i = this.rowItem(x); return [x.slot, x.refObjId, i?.plus, i?.variance, i?.magic, x.goals.target, this.rowStatus.get(x)]; })]);
     if (UI.queueTable && UI.queueTable.dataset.key !== queueKey) { UI.queueTable.dataset.key = queueKey; this.drawQueue(); }
@@ -17658,7 +17709,182 @@ const Alchemy = {
 };
 
 
-const RELEASE_NOTES = [{"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.278", "title": "A full bag now says why the town trip stops", "items": ["When the character bag is nearly full and nothing in it can be sold or stored, the trip now warns you on arrival in town. It still sells the pet's loot, then stops before walking back, as before.", "The stop message now explains why: selling pet loot does not free bag space, because the loot only passes through one bag slot. It also tells you what to change: turn on \"Sell ordinary gear from the character bag too\", add Sell or Store item rules, or clear some bag space.", "With bag selling already on, it reminds you that only ordinary Chinese / European gear sells from the bag without a Sell rule."], "note": "Only the messages changed; the trip itself works as before. Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.277", "title": "Start and stop characters from the live dashboard", "items": ["New setting on the Settings page, under Live dashboard: \"Allow Start and Stop from the dashboard\". Off by default, set per character.", "When it is on, that character's dashboard card gets a Start or Stop button, and Start all / Stop all sit at the top and ask before acting.", "Stop does the same as Stop all in the bot panel, so it also cancels auto-start. Start only acts while the bot is stopped, so a late Start never stops a running bot.", "The command reaches the game with the character's next report (about every 10 seconds). A command older than 90 seconds is ignored, so a bot that comes back later does not act on an old one.", "Anyone with your dashboard link can start and stop the characters that allow it, so keep the link private."], "note": "Contributed by alexg-93 (#111). Tested with the integration, hub and dashboard test suites and in a live game from a phone using the self-hosted hub; not tested on a deployed Cloudflare Worker."}, {"version": "1.2.276", "title": "Optional auto-login after a server restart", "items": ["New setting under Behaviour: \"Log in again by itself after a server restart\". Off by default.", "While it is on, the bot remembers the ID, password and server of your next login on the game's login screen. When a disconnect ends with you signed out, it logs in again, enters the same character and carries on hunting.", "Turned on while already in game? Log out and log in once so it can remember the login.", "The login is kept unencrypted in this browser's storage for the site; anyone using the same browser profile can read it. Turning the setting off forgets it. It never goes into logs, diagnostics, reports or shared profiles.", "If the server refuses the login three times (wrong password, for example) it stops and waits for you; a server that is still restarting is tried again every few minutes."], "note": "Tested with the integration suite against simulated game states; a real server restart has not been exercised yet."}, {"version": "1.2.275", "title": "Bot reloads when a walk never gets collision data", "items": ["If a town trip or walk back has been waiting on \"Waiting for game collision data\" for 3 minutes, the bot now reloads the game page by itself instead of waiting forever.", "Your character and hunting are kept, and hunting resumes once the world loads again.", "This only happens while the bot is working (hunting, a town trip or a walk back); a stopped bot never reloads.", "Reloads in a row wait longer each time (3, 6, 12 minutes and so on, up to 30), and the count clears once collision data arrives.", "If the game sends collision data the bot cannot use, it does not reload and shows the reason instead."], "note": "Contributed by NiftyOps (#109). Tested in simulation only, not in a live game; the lost collision data case was not reproduced on a live server."}, {"version": "1.2.274", "title": "Declines party resurrection when town is needed", "items": ["On the Party page, \"Accept resurrection from party members\" now checks whether a town trip is needed before saying Yes.", "If the Town page's \"Revive in town and go back to the hunting spot\" is on and you are out of return scrolls or gold, your gear is broken or worn out, or a chosen potion has run out, the bot says No to the party resurrection and revives in town instead, so the town services can refill you.", "A new Party option, \"Revive in town instead when town is needed\", is on by default; turn it off to keep accepting party resurrections as before.", "It works while hunting and while stopped, and stopped hunting stays stopped.", "This is on by default for anyone using Accept resurrection with the town cycle; while stopped it revives you in town even when On death is set to Wait or Stop."], "note": "Contributed by NiftyOps (#110). Tested in simulation only, not in a live game; the No answer to the resurrection question has not been checked on a live server."}];
+// Buying what the alchemy queue needs. On live OpenSRO the Jangan grocery merchant is "OpenSRO Alchemy - Jangan": its
+// talk menu has an "Alchemy" row that opens a shop of elixirs, lucky powder, attribute (white) stones and alchemy
+// (blue and Luck/Steady/Immortal/Astral) stones. The bot works out, from the queued items still to do and their goals,
+// which materials of each item's degree it needs, walks to that merchant, and tops each one up to the amount set in
+// Settings, within a gold budget. Never resends an unconfirmed purchase: a sent buy is settled by the bag count rising.
+const ALCHEMY_BUY_STEP_MS = 12000;   // an unconfirmed purchase ends the visit, nothing is repeated
+const ALCHEMY_BUY_OPEN_MS = 15000;
+const ALCHEMY_BUY_NEAR = 200;        // merchant service range, game units
+const ALCHEMY_BUY_STOP = 120;        // walk until this close
+const fmtGold = n => BigInt(n).toLocaleString('en-US');
+const AlchemyBuy = {
+  run: null, message: '',
+  cfg() { return Settings.profile.alchemy.buy; },
+  gold() { try { return toBigInt(World.gp?.progression?.gold ?? 0); } catch { return 0n; } },
+  // The materials the queued items still need, one entry per material: { key, label, refs, stock, kind }. `refs` are the
+  // item ids that count as that material (an elixir or powder comes in two grades, either does); the first one the merchant
+  // sells is bought. Only steps that still have something to do on an item ask for their materials.
+  needs(rows = Alchemy.rows()) {
+    const list = new Map(), stock = this.cfg().stock;
+    const add = (key, label, refs, kind) => { if (!list.has(key)) list.set(key, { key, label, refs, kind, stock: stock[kind] }); };
+    for (const row of rows) {
+      const item = Alchemy.rowItem(row), g = row.goals;
+      if (!item) continue;
+      const degree = Alchemy.degree(item), kind = Alchemy.kind(item);
+      if (!degree) continue;
+      if (Alchemy.stepWanted('plus', item, g)) {
+        const elixirs = (ALCHEMY_DATA.kinds[kind] || []).slice().sort((a, b) => (b === g.elixir) - (a === g.elixir));
+        if (!g.elixir || elixirs.includes(g.elixir)) add('elixir:' + kind, `${kind} elixir`, g.elixir ? [g.elixir] : elixirs, 'elixir');
+        if (g.powder) add('powder:' + degree, `lucky powder (degree ${degree})`, [3682 + degree, 3694 + degree], 'powder');
+        const helpers = Object.keys(STONES).filter(k => g.use?.[k]);
+        // Each Astral charge needs an Immortal one first, so Astral also asks for Immortal stones.
+        if (helpers.includes('astral') && !helpers.includes('immortal')) helpers.push('immortal');
+        for (const k of helpers) add(k + ':' + degree, `${STONES[k].label} stone (degree ${degree})`, [STONES[k].base + degree - 1], 'protect');
+      }
+      if (Alchemy.stepWanted('white', item, g)) for (const a of Alchemy.attributes(kind)) {
+        const target = Alchemy.attrTarget(a.name, g);
+        if (target && Alchemy.attrValue(item, a.index) < target) add(a.name + ':' + degree, `${ATTRIBUTE_LABEL[a.name]} stone (degree ${degree})`, [ALCHEMY_DATA.attrStones[a.name] + degree - 1], 'white');
+      }
+      if (Alchemy.stepWanted('blue', item, g)) for (const name of Alchemy.blues(item)) {
+        const target = Alchemy.blueTarget(name, g, degree);
+        if (target && Alchemy.attributeCount(item, name) < target) add(name + ':' + degree, `${BLUE_LABEL[name]} stone (degree ${degree})`, [ALCHEMY_DATA.magicStones[name] + degree - 1], 'blue');
+      }
+    }
+    return [...list.values()].filter(n => n.stock > 0);
+  },
+  have(need) { return need.refs.reduce((n, ref) => n + Restock.count(ref), 0); },
+  // What is short now: how many of each to buy to reach the stock amount.
+  shortfall(rows) { return this.needs(rows).map(n => ({ ...n, missing: Math.max(0, n.stock - this.have(n)) })).filter(n => n.missing > 0); },
+  // The merchant: the saved one (ALCHEMY_MERCHANT), or an NPC in view whose name says Alchemy. The whole shop arrives on
+  // opening (every tab, the talk menu's Alchemy row only picks which tabs the game window shows), so the offers are
+  // found by item id and bought by their own tab and slot.
+  merchant() {
+    const pose = World.pose(), known = this.cfg().merchant?.refObjId || ALCHEMY_MERCHANT.refObjId;
+    const near = [...World.ents.values()].filter(e => e.kind === 'npc' && (known ? e.refObjId === known : ALCHEMY_MERCHANT.name.test(e.name || '')))
+      .sort((a, b) => dist2D(pose, a) - dist2D(pose, b))[0];
+    if (near) {
+      const spot = { refObjId: near.refObjId, regionId: near.regionId, x: near.x, y: near.y, z: near.z }, saved = this.cfg().merchant;
+      // Remembered once seen, so a later visit can walk to it from anywhere in Jangan.
+      if (!saved || saved.refObjId !== spot.refObjId || dist2D(saved, spot) > 5) { this.cfg().merchant = spot; Settings.saveProfile(); }
+      return spot;
+    }
+    const saved = this.cfg().merchant;
+    return saved?.refObjId ? saved : ALCHEMY_MERCHANT.regionId ? ALCHEMY_MERCHANT : null;
+  },
+  // Gold this visit may spend: the per-visit limit, and never below the gold to keep.
+  budget() { const c = this.cfg(), free = this.gold() - toBigInt(c.keep); return free < 1n ? 0n : free < toBigInt(c.spend) ? free : toBigInt(c.spend); },
+  // Starts a visit for the queued rows. Returns '' when it started, else why not. `onDone(summary)` runs when it ends,
+  // bought or not; the queue then carries on with what is in the bag.
+  start(rows, onDone) {
+    if (this.run) return 'A purchase is already running.';
+    if (!this.cfg().on) return 'Buying is off.';
+    const list = this.shortfall(rows);
+    if (!list.length) return 'Nothing to buy.';
+    const spec = this.merchant();
+    if (!spec) return 'The alchemy merchant is not known here; stand in Jangan near "OpenSRO Alchemy".';
+    if (!(dist2D(World.pose(), spec) <= 3000)) return 'Too far from the Jangan alchemy merchant; go to Jangan first.';
+    if (this.budget() < 1n) return 'Not enough gold above the amount to keep.';
+    this.run = { stage: 'prep', rows, spec, list, onDone, at: now(), manualAt: Manual.lastAt, character: World.charName, pend: null, open: null,
+      startGold: this.gold(), budget: this.budget(), got: {}, skipped: [] };
+    Alchemy.note(`Buying: ${list.map(n => `${n.missing} ${n.label}`).join(', ')} (up to ${fmtGold(this.run.budget)} gold).`);
+    this.message = 'Going to the alchemy merchant.';
+    return '';
+  },
+  // Ends the visit: the shop is closed first (the queue cannot go on with it open), then `onDone` runs.
+  end(reason, ok = false) {
+    const r = this.run; if (!r) return;
+    if (WalkBack.active) WalkBack.cancel('', true);
+    if (!r.final && (Restock.activeShop() || World.gp?.shop) && World.inWorld()) { r.final = { reason, ok }; r.stage = 'close'; r.closeAt = now(); return; }
+    this.run = null;
+    const bought = Object.entries(r.got).map(([label, n]) => `${n} ${label}`), spent = r.startGold - this.gold();
+    const text = reason + (bought.length ? ` Bought ${bought.join(', ')} for ${fmtGold(spent > 0n ? spent : 0n)} gold.` : '') +
+      (r.skipped.length ? ` Not bought: ${r.skipped.join(', ')}.` : '');
+    this.message = text; Alchemy.note(text);
+    if (!ok) { Log.warn('Alchemy: ' + text); UI.toast(text, 'warn', 6000); }
+    r.onDone?.(text);
+  },
+  tick() {
+    const r = this.run;
+    if (!r) return false;
+    if (!World.inWorld() || !World.gp || !World.local()) return true;
+    if (World.isDead()) { this.end('Buying stopped: the character died.'); return true; }
+    if (Manual.lastAt !== r.manualAt || r.character !== World.charName) { this.end('Buying stopped by manual control.'); return true; }
+    if (WalkBack.active) { WalkBack.tick(); return true; }
+    this[r.stage + 'Stage']();
+    return true;
+  },
+  closeStage() {
+    const r = this.run, gp = World.gp;
+    if ((Restock.activeShop() || gp.shop) && now() - r.closeAt < 5000) { if (!gp.inventoryPending && Cmd.spaced('npc-close')) Cmd.raw({ kind: 'npc-close' }, 'Alchemy: close the merchant'); return; }
+    const f = r.final; this.end(f.reason, f.ok);
+  },
+  // The alchemy window and the shop cannot both be open: close ours first.
+  prepStage() {
+    const r = this.run, a = World.gp.alchemy;
+    if (World.gp.inventoryPending || a?.pending) return;
+    if (a?.visible) { if (Cmd.spaced('alchemy-close')) Cmd.raw({ kind: 'alchemy-close' }, 'Alchemy: close the window to shop'); if (now() - r.at > 10000) this.end('Buying stopped: the alchemy window did not close.'); return; }
+    r.stage = 'buy';
+  },
+  // Walk to the merchant and open its shop; returns the open shop, or null while walking or waiting.
+  visit() {
+    const r = this.run, spec = r.spec, d = dist2D(World.pose(), spec);
+    if (d > ALCHEMY_BUY_NEAR) {
+      r.open = null; this.message = 'Walking to the alchemy merchant.';
+      if (!WalkBack.startTo(spec, { label: 'the alchemy merchant', stop: ALCHEMY_BUY_STOP, onDone: () => {}, onFail: reason => this.end('Buying stopped: ' + reason) }) && this.run) this.end('Buying stopped: cannot walk to the alchemy merchant.');
+      return null;
+    }
+    const gp = World.gp;
+    r.open ||= { at: now(), sent: false, revision: 0, ready: false };
+    const o = r.open;
+    if (!o.ready && now() - o.at > ALCHEMY_BUY_OPEN_MS) { this.end('Buying stopped: the alchemy merchant did not open the shop.'); return null; }
+    const npc = [...World.ents.values()].filter(e => e.kind === 'npc' && e.refObjId === spec.refObjId && dist2D(e, spec) < ALCHEMY_BUY_NEAR)
+      .sort((a, b) => dist2D(World.pose(), a) - dist2D(World.pose(), b))[0];
+    if (!npc || gp.targetPending) return null;
+    if (gp.target !== npc.gid) { if (Cmd.spaced('select')) Cmd.select(npc.gid); return null; }
+    if (!o.sent && !gp.inventoryPending && Cmd.raw({ kind: 'shop-open', gid: npc.gid }, 'Alchemy: open the merchant')) { o.sent = true; o.revision = gp.shopCompletionRevision; }
+    // A cached catalogue must not count as a fresh shop-open answer.
+    if (!o.sent || gp.inventoryPending || gp.shop?.npc !== npc.gid || (!o.ready && gp.shopCompletionRevision === o.revision)) return null;
+    const shop = Restock.activeShop();
+    if (!shop) return null;
+    if (shop.error) { this.end('Buying stopped: ' + shop.error); return null; }
+    o.ready = true;
+    return shop;
+  },
+  // Room in the bag for `quantity` more of an offer: free slots, plus what the stacks already there can take.
+  room(offer) {
+    const max = offer.maxStack || 1;
+    return World.items().filter(i => i.refObjId === offer.refObjId && i.slot >= 13).reduce((n, i) => n + Math.max(0, max - (i.quantity ?? 1)), 0) + World.freeBagSlots() * max;
+  },
+  buyStage() {
+    const r = this.run, shop = this.visit();
+    if (!shop || !this.run) return;
+    const gp = World.gp, p = r.pend;
+    if (p) {
+      if (now() - p.at > ALCHEMY_BUY_STEP_MS) return this.end(`Buying stopped: ${p.label} was not confirmed${gp.error ? ' (' + gp.error + ')' : ''}; nothing was repeated.`);
+      if (gp.inventoryPending || now() - p.at < 500 || this.have(p.need) <= p.before) return;
+      r.pend = null; r.got[p.label] = (r.got[p.label] || 0) + this.have(p.need) - p.before;
+    }
+    if (gp.inventoryPending || !Cmd.spaced('shop-buy')) return;
+    const need = r.list.find(n => !r.skipped.some(s => s.startsWith(n.label + ' (')) && this.have(n) < n.stock);
+    if (!need) return this.end(r.skipped.length ? 'Done buying.' : 'Bought what the queue needs.', true);
+    const offer = need.refs.map(ref => shop.offers.find(o => o.refObjId === ref && (o.currency === undefined || o.currency === 1))).find(Boolean);
+    if (!offer) { r.skipped.push(need.label + ' (not sold here)'); return; }
+    const price = toBigInt(offer.price) || 1n, left = r.budget - (r.startGold - this.gold());
+    const quantity = Math.min(need.stock - this.have(need), offer.purchaseLimit ?? offer.maxStack ?? 1, 65535, this.room(offer), Number(left / price));
+    if (quantity < 1) { r.skipped.push(need.label + (this.room(offer) < 1 ? ' (bag full)' : ' (gold limit)')); return; }
+    if (Cmd.raw({ kind: 'shop-buy', tab: offer.tab, slot: offer.slot, quantity }, `Alchemy: buy ${quantity} ${need.label}`)) {
+      r.pend = { need, label: need.label, before: this.have(need), at: now() };
+      this.message = `Buying ${quantity} ${need.label}.`;
+    }
+  },
+};
+// The Jangan alchemy merchant on live OpenSRO. Without a saved id the bot looks for an NPC in view named like this.
+const ALCHEMY_MERCHANT = { name: /alchemy/i, refObjId: 0, regionId: 0, x: 0, y: 0, z: 0 };
+
+
+const RELEASE_NOTES = [{"version": "1.2.282", "title": "Alchemy queue buys its own elixirs and stones", "items": ["New in the Alchemy tab: \"Buy what the queue needs\". Off by default, because it spends gold.", "With it on, the queue first visits \"OpenSRO Alchemy\" in Jangan and buys what the queued items need at their degree: elixirs, lucky powder, Luck/Steady/Immortal/Astral, white and blue stones.", "You set how many of each to have in the bag, the most gold one visit may spend (20 million by default) and the gold it always keeps (1 million by default).", "When an item runs out on the way, the queue goes to the merchant once more before skipping that item.", "Only what the merchant sells is bought. Every purchase is confirmed by the bag; one that is not confirmed is never sent again.", "Start the queue in Jangan. The bot remembers where it saw the merchant, so later it walks there from anywhere in town."], "note": "Tested in simulation only. This is the first version that buys from that merchant; try it with a small gold limit first."}, {"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.278", "title": "A full bag now says why the town trip stops", "items": ["When the character bag is nearly full and nothing in it can be sold or stored, the trip now warns you on arrival in town. It still sells the pet's loot, then stops before walking back, as before.", "The stop message now explains why: selling pet loot does not free bag space, because the loot only passes through one bag slot. It also tells you what to change: turn on \"Sell ordinary gear from the character bag too\", add Sell or Store item rules, or clear some bag space.", "With bag selling already on, it reminds you that only ordinary Chinese / European gear sells from the bag without a Sell rule."], "note": "Only the messages changed; the trip itself works as before. Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.277", "title": "Start and stop characters from the live dashboard", "items": ["New setting on the Settings page, under Live dashboard: \"Allow Start and Stop from the dashboard\". Off by default, set per character.", "When it is on, that character's dashboard card gets a Start or Stop button, and Start all / Stop all sit at the top and ask before acting.", "Stop does the same as Stop all in the bot panel, so it also cancels auto-start. Start only acts while the bot is stopped, so a late Start never stops a running bot.", "The command reaches the game with the character's next report (about every 10 seconds). A command older than 90 seconds is ignored, so a bot that comes back later does not act on an old one.", "Anyone with your dashboard link can start and stop the characters that allow it, so keep the link private."], "note": "Contributed by alexg-93 (#111). Tested with the integration, hub and dashboard test suites and in a live game from a phone using the self-hosted hub; not tested on a deployed Cloudflare Worker."}, {"version": "1.2.276", "title": "Optional auto-login after a server restart", "items": ["New setting under Behaviour: \"Log in again by itself after a server restart\". Off by default.", "While it is on, the bot remembers the ID, password and server of your next login on the game's login screen. When a disconnect ends with you signed out, it logs in again, enters the same character and carries on hunting.", "Turned on while already in game? Log out and log in once so it can remember the login.", "The login is kept unencrypted in this browser's storage for the site; anyone using the same browser profile can read it. Turning the setting off forgets it. It never goes into logs, diagnostics, reports or shared profiles.", "If the server refuses the login three times (wrong password, for example) it stops and waits for you; a server that is still restarting is tried again every few minutes."], "note": "Tested with the integration suite against simulated game states; a real server restart has not been exercised yet."}, {"version": "1.2.275", "title": "Bot reloads when a walk never gets collision data", "items": ["If a town trip or walk back has been waiting on \"Waiting for game collision data\" for 3 minutes, the bot now reloads the game page by itself instead of waiting forever.", "Your character and hunting are kept, and hunting resumes once the world loads again.", "This only happens while the bot is working (hunting, a town trip or a walk back); a stopped bot never reloads.", "Reloads in a row wait longer each time (3, 6, 12 minutes and so on, up to 30), and the count clears once collision data arrives.", "If the game sends collision data the bot cannot use, it does not reload and shows the reason instead."], "note": "Contributed by NiftyOps (#109). Tested in simulation only, not in a live game; the lost collision data case was not reproduced on a live server."}];
 
 // Check trusted repository metadata; never execute downloaded update code.
 const Updates = {

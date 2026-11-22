@@ -304,6 +304,7 @@ const Alchemy = {
   },
   delay() { return Math.min(10000, Math.max(500, Math.floor(Number(this.cfg().delay)) || 1000)); },
   stop(reason = 'Alchemy stopped. An attempt already sent may still finish.') {
+    if (AlchemyBuy.run) AlchemyBuy.end('Buying stopped.');
     if (this.queue) {
       const q = this.queue; this.queue = null;
       if (this.run?.queued) this.addTotals(q.totals, this.run);
@@ -425,6 +426,8 @@ const Alchemy = {
   },
   tick() {
     this.observe();
+    // A visit to the alchemy merchant owns the character until it ends; the queue waits.
+    if (AlchemyBuy.run && !this.run && !this.pending) { AlchemyBuy.tick(); return; }
     // Between two queued steps, the next one starts here and sends its first request in the same tick.
     if (!this.run && this.queue && !this.pending) this.queueTick();
     const r = this.run, gp = World.gp;
@@ -525,7 +528,7 @@ const Alchemy = {
     return this.rows().some(row => row.slot === item.slot && row.refObjId === item.refObjId);
   },
   // Anything alchemy owns right now: a step, an unconfirmed result, or a queue between two steps.
-  active() { return !!(this.run || this.pending || this.queue); },
+  active() { return !!(this.run || this.pending || this.queue || AlchemyBuy.run); },
   //============================================================================
   // The queue: items done one after another. Each row is { refObjId, slot, goals } in Settings (goals as alchemyGoals());
   // the bot does Plus, then White, then Blue on it, then the next row. A step reuses the single-item code with the row's goals.
@@ -587,15 +590,29 @@ const Alchemy = {
     for (const row of rows) this.rowStatus.set(row, 'Waiting');
     this.result = this.queue.totals; this.message = 'Queue started.';
     this.note(`Queue started: ${rows.length} item${rows.length > 1 ? 's' : ''}.`);
+    this.buyFor(rows);
+  },
+  // With buying on, a visit to the alchemy merchant for what `rows` still need. True when one started.
+  buyFor(rows) {
+    if (!this.cfg().buy?.on) return false;
+    const error = AlchemyBuy.start(rows, () => { if (this.queue) this.queue.nextAt = now() + this.delay(); });
+    if (error && error !== 'Nothing to buy.') this.note('Not buying: ' + error);
+    return !error;
   },
   // Between steps: pick the next step with something to do on the current row and start it.
   queueTick() {
     const q = this.queue, blocked = this.blocked();
+    // Just after a merchant visit the shop is still closing and the last step may still be settling: wait a little.
+    if (blocked && /^(Wait for combat and movement|Close shop)/.test(blocked) && !Hunt.underAttack()) {
+      q.blockedSince ||= now(); this.message = blocked;
+      if (now() - q.blockedSince < 10000) return;
+    }
+    q.blockedSince = 0;
     if (blocked || q.character !== World.charName || q.manualAt !== Manual.lastAt) return this.stop(blocked || 'Alchemy stopped: character or manual control changed.');
     if (!this.rows().includes(q.row)) return this.stop('Alchemy stopped: the queue changed.');
     if (now() < q.nextAt) return;
     const item = this.rowItem(q.row);
-    if (!item) return this.queueMissing(`not in bag slot ${q.row.slot} any more`);
+    if (!item) return this.queueMissing(`not in bag slot ${q.row.slot} any more`, false);
     for (let i = QUEUE_STEPS.indexOf(q.step); i < QUEUE_STEPS.length; i++) {
       const step = QUEUE_STEPS[i]; q.step = step;
       if (!this.stepWanted(step, item, q.row.goals)) continue;
@@ -620,8 +637,14 @@ const Alchemy = {
     this.rowStatus.set(q.row, STEP_LABEL[q.step] + ' done'); q.nextAt = now() + this.delay();
     if (next < QUEUE_STEPS.length) q.step = QUEUE_STEPS[next]; else this.rowDone();
   },
-  queueMissing(reason) {
+  queueMissing(reason, buyable = true) {
     const q = this.queue, name = this.rowName(q.row), text = reason.charAt(0).toUpperCase() + reason.slice(1);
+    // Once per item: buy what it and the items after it need, then try the same step again.
+    if (buyable && q.boughtFor !== q.row) {
+      q.boughtFor = q.row;
+      const rows = this.rows();
+      if (this.buyFor(rows.slice(rows.indexOf(q.row)))) { this.rowStatus.set(q.row, 'Buying materials'); this.note(`${name}: ${text} Buying more.`); return; }
+    }
     if (this.cfg().onMissing === 'stop') return this.stop(`${name}: ${text}`);
     this.rowStatus.set(q.row, 'Skipped: ' + text); q.skipped++;
     this.note(`${name} skipped: ${text}`); this.nextRow();
@@ -660,6 +683,20 @@ const Alchemy = {
       el('p', 'Each item gets Plus, then White, then Blue, then the next item starts. Blues come last because a white stone that works can roll a blue again. A step with no goal is passed over. Stop hunting and travel first; Stop prevents the next attempt, a sent one may still finish.', 'muted'));
     UI.alchemyNote = el('p', '', 'muted'); queue.append(UI.alchemyNote);
     UI.pane.append(queue);
+    // Buying at the Jangan alchemy merchant
+    const b = () => c().buy, buy = UI.group('Buy at the Jangan alchemy merchant');
+    UI.alchemyBuyList = el('p', '', 'muted');
+    buy.append(UI.check('Buy what the queue needs (spends gold)', () => b().on, v => b().on = v),
+      UI.number('Elixirs to have', () => b().stock.elixir, n => b().stock.elixir = n, 0, 1000),
+      UI.number('Lucky powder to have', () => b().stock.powder, n => b().stock.powder = n, 0, 1000),
+      UI.number('Each Luck / Steady / Immortal / Astral stone to have', () => b().stock.protect, n => b().stock.protect = n, 0, 1000),
+      UI.number('Each white stone to have', () => b().stock.white, n => b().stock.white = n, 0, 1000),
+      UI.number('Each blue stone to have', () => b().stock.blue, n => b().stock.blue = n, 0, 1000),
+      UI.number('Spend at most this much gold per visit', () => b().spend, n => b().spend = n, 0, 1e12, 100000),
+      UI.number('Always keep this much gold', () => b().keep, n => b().keep = n, 0, 1e12, 100000),
+      UI.alchemyBuyList,
+      el('p', 'Off by default. With it on, the queue first visits "OpenSRO Alchemy" in Jangan and tops up what the queued items need, at the degree of each item, to the amounts above; when an item runs out on the way, it goes once more before skipping it. It never spends more than the limit per visit or goes below the gold to keep, and it stops when a purchase is not confirmed. Start the queue in Jangan. Only what the merchant sells is bought.', 'muted'));
+    UI.pane.append(buy);
     // Goals of the selected row
     const goals = UI.group('Goals'), tabs = el('div', null, 'subtabs');
     UI.goalsTitle = el('p', '', 'muted');
@@ -759,7 +796,11 @@ const Alchemy = {
     if (!UI.is('Alchemy') || !UI.alchemyNote) return;
     const { row, item, goals: c } = this.editing(), r = this.stats(), q = this.queue;
     const fmt = n => !Number.isFinite(n) ? 'a huge number of' : n < 100 ? n.toFixed(n < 10 ? 1 : 0) : n < 1e6 ? Math.round(n).toLocaleString('en-US') : n.toExponential(1);
-    UI.alchemyNote.textContent = this.message + (q?.row ? `\nQueue: item ${this.rows().indexOf(q.row) + 1} of ${this.rows().length} · ${STEP_LABEL[q.step]} · ${q.done} done` + (q.skipped ? ` · ${q.skipped} skipped` : '') : '');
+    if (UI.alchemyBuyList?.isConnected) {
+      const list = AlchemyBuy.shortfall(this.rows());
+      UI.alchemyBuyList.textContent = AlchemyBuy.run ? AlchemyBuy.message : list.length ? 'Would buy now: ' + list.map(n => `${n.missing} ${n.label}`).join(', ') + '.' : 'Nothing to buy for the queue right now.';
+    }
+    UI.alchemyNote.textContent = (AlchemyBuy.run ? AlchemyBuy.message : this.message) + (q?.row ? `\nQueue: item ${this.rows().indexOf(q.row) + 1} of ${this.rows().length} · ${STEP_LABEL[q.step]} · ${q.done} done` + (q.skipped ? ` · ${q.skipped} skipped` : '') : '');
     // The queue lines show live plus values and statuses, so they are rebuilt when any of that changes.
     const queueKey = JSON.stringify([this.editRow, q?.step, this.rows().indexOf(q?.row), !!this.run, ...this.rows().map(x => { const i = this.rowItem(x); return [x.slot, x.refObjId, i?.plus, i?.variance, i?.magic, x.goals.target, this.rowStatus.get(x)]; })]);
     if (UI.queueTable && UI.queueTable.dataset.key !== queueKey) { UI.queueTable.dataset.key = queueKey; this.drawQueue(); }

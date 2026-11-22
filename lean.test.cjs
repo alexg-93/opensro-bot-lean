@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Reporter, Live, Alchemy, BuffGear, Icons, Assets, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, Quest, QuestData, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, SellStar, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, AutoLogin, Lure, Search, Nearby, Equip, stopAll, toggleBot, userStop, RunIntent, Retry, PetAttack, MallProbe, MallBuyer, LevelSpot, Leveling, ScrollBuff, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Reporter, Live, Alchemy, AlchemyBuy, ALCHEMY_MERCHANT, BuffGear, Icons, Assets, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, Quest, QuestData, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, SellStar, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, AutoLogin, Lure, Search, Nearby, Equip, stopAll, toggleBot, userStop, RunIntent, Retry, PetAttack, MallProbe, MallBuyer, LevelSpot, Leveling, ScrollBuff, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document, sharedStorage) {
   let time = 100000;
   const storage = sharedStorage || new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -8122,6 +8122,107 @@ test('queued alchemy items are kept in the bag like the selected one', () => {
   assert.equal(A.protects({ ...second, refObjId: 999 }), false, 'another item in that slot is not');
   assert.equal(A.protects(f.World.items().find(i => i.slot === 14)), false, 'elixirs are not');
   A.select(13); A.removeRow(0); assert.equal(A.protects(f.World.items().find(i => i.slot === 13)), true, 'the selected item still is');
+});
+// Buying for the queue at the alchemy merchant. queueFixture: the first weapon needs weapon elixirs (10 in the bag),
+// the second wants Str (5 Str stones in the bag). The merchant stands next to the character and sells both.
+const BUY_ELIXIR = { refObjId: 3679, name: 'Elixir (weapon)', tab: 0, slot: 1, price: '1000000', maxStack: 50 };
+const BUY_STR = { refObjId: 6687, name: 'Str stone', tab: 2, slot: 0, price: '2000000', maxStack: 20 };
+function buyFixture({ offers = [BUY_ELIXIR, BUY_STR], gold = '200000000', answer = true } = {}) {
+  const f = queueFixture(), gp = () => f.World.gp, b = f.Settings.profile.alchemy.buy;
+  b.on = true;
+  const pose = f.World.pose(), npc = { gid: 500, kind: 'npc', name: 'OpenSRO Alchemy - Jangan', refObjId: 9999, regionId: pose.regionId, x: pose.x + 20, y: pose.y, z: pose.z };
+  f.World.ents.set(npc.gid, npc);
+  gp().progression.gold = gold; gp().alchemy.visible = false;
+  const stats = { buys: [] };
+  // One game step: let the bot act, then answer what it sent.
+  f.step = (ms = 600) => {
+    f.advance(ms); f.Controller.tick();
+    const g = gp();
+    for (const cmd of f.commands.splice(0)) {
+      if (cmd.kind === 'select') g.target = cmd.gid;
+      else if (cmd.kind === 'shop-open') { stats.opens = (stats.opens || 0) + 1; g.shopCompletionRevision++; g.shop = { npc: cmd.gid, offers }; }
+      else if (cmd.kind === 'npc-close') { g.shop = null; g.target = 0; }
+      else if (cmd.kind === 'alchemy-close') g.alchemy = { ...g.alchemy, visible: false };
+      else if (cmd.kind === 'alchemy-open') g.alchemy = { ...g.alchemy, visible: true };
+      else if (cmd.kind === 'shop-buy') {
+        stats.buys.push({ tab: cmd.tab, slot: cmd.slot, quantity: cmd.quantity });
+        if (!answer) continue;
+        const offer = offers.find(o => o.tab === cmd.tab && o.slot === cmd.slot);
+        g.progression.gold = String(BigInt(g.progression.gold) - BigInt(offer.price) * BigInt(cmd.quantity));
+        const row = g.inventory.find(i => i.refObjId === offer.refObjId); if (row) row.quantity += cmd.quantity;
+      } else f.sentLater = (f.sentLater || []).concat(cmd);
+    }
+  };
+  f.stats = stats;
+  return f;
+}
+test('alchemy buying: the shopping list follows the queued goals, at each item degree, up to the amounts set', () => {
+  const f = buyFixture(), list = f.AlchemyBuy.shortfall(f.Settings.profile.alchemy.queue);
+  assert.deepEqual(JSON.parse(JSON.stringify(list.map(n => [n.label, n.missing, n.refs]))), [['weapon elixir', 40, [3675, 3679]], ['Str stone (degree 9)', 15, [6687]]]);
+  const g = f.Settings.profile.alchemy.queue[0].goals; g.powder = true; g.use.astral = true;
+  const labels = f.AlchemyBuy.shortfall(f.Settings.profile.alchemy.queue).map(n => n.label);
+  assert.ok(labels.includes('lucky powder (degree 9)') && labels.includes('Astral stone (degree 9)'));
+  assert.ok(labels.includes('Immortal stone (degree 9)'), 'Astral charges need Immortal ones');
+  f.Settings.profile.alchemy.buy.stock.blue = 0;
+  assert.equal(f.AlchemyBuy.shortfall(f.Settings.profile.alchemy.queue).some(n => /Str/.test(n.label)), false, 'an amount of 0 buys none');
+});
+test('alchemy buying: the queue first buys within the gold limit, closes the shop, then starts', () => {
+  const f = buyFixture();
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 30 && f.AlchemyBuy.run; i++) f.step();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.stats.buys)), [{ tab: 0, slot: 1, quantity: 20 }], '20 million buys 20 elixirs, nothing is left for Str');
+  assert.equal(f.World.gp.shop, null, 'the shop is closed');
+  assert.ok(f.Alchemy.log.some(l => /^Done buying\. Bought 20 weapon elixir for 20,000,000 gold\. Not bought: weapon elixir \(gold limit\), Str stone \(degree 9\) \(gold limit\)/.test(l.text)));
+  assert.ok(f.Alchemy.queue, 'the queue goes on');
+  for (let i = 0; i < 10 && !f.commands.some(c => c.mode === 'reinforce') && !(f.sentLater || []).some(c => c.mode === 'reinforce'); i++) f.step();
+  assert.ok((f.sentLater || []).concat(f.commands).some(c => c.kind === 'alchemy-start' && c.mode === 'reinforce'), 'then the first item is enhanced');
+});
+test('alchemy buying: the gold to keep is never spent, and what the merchant does not sell is named', () => {
+  const f = buyFixture({ offers: [BUY_STR], gold: '16000000' });
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 30 && f.AlchemyBuy.run; i++) f.step();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.stats.buys)), [{ tab: 2, slot: 0, quantity: 7 }], '15 million above the million to keep buys 7 at 2 million');
+  assert.equal(f.World.gp.progression.gold, '2000000', 'the million to keep is never touched');
+  assert.ok(f.Alchemy.log.some(l => /Not bought: weapon elixir \(not sold here\)/.test(l.text)));
+  const poor = buyFixture({ gold: '1000000' }); poor.Alchemy.startQueue();
+  assert.equal(poor.AlchemyBuy.run, null); assert.ok(poor.Alchemy.log.some(l => /Not buying: Not enough gold/.test(l.text)));
+});
+test('alchemy buying: the merchant is remembered once seen and walked to from further away', () => {
+  const f = buyFixture(); f.Alchemy.startQueue(); f.step();
+  const saved = f.Settings.profile.alchemy.buy.merchant;
+  assert.equal(saved.refObjId, 9999);
+  f.Alchemy.stop(); for (let i = 0; i < 10 && f.AlchemyBuy.run; i++) f.step();
+  const npc = f.World.ents.get(500); f.World.ents.delete(500);
+  let walked = null; f.WalkBack.startTo = (dest, opts) => { walked = dest; f.World.ents.set(500, npc); f.World.gp.pose = { ...f.World.gp.pose }; opts.onDone?.(); return false; };
+  f.World.gp.pose = { ...f.World.pose(), x: f.World.pose().x + 1000 };
+  f.Alchemy.startQueue(); assert.ok(f.AlchemyBuy.run, 'the saved spot is enough to start');
+  for (let i = 0; i < 5 && !walked; i++) f.step();
+  assert.equal(walked?.refObjId, 9999, 'it walks to the saved merchant');
+  assert.equal(f.botProfile({ alchemy: { buy: { merchant: { refObjId: 'x' } } } }).alchemy.buy.merchant, null, 'a broken saved spot is dropped');
+});
+test('alchemy buying: an unconfirmed purchase is never repeated, and far from the merchant nothing is bought', () => {
+  const f = buyFixture({ answer: false });
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 40 && f.AlchemyBuy.run; i++) f.step();
+  assert.equal(f.stats.buys.length, 1, 'sent once');
+  assert.ok(f.Alchemy.log.some(l => /was not confirmed; nothing was repeated/.test(l.text)));
+  const far = buyFixture(); far.World.ents.delete(500);
+  far.Alchemy.startQueue();
+  assert.equal(far.AlchemyBuy.run, null); assert.ok(far.Alchemy.log.some(l => /Not buying: The alchemy merchant is not known here/.test(l.text)));
+  const off = buyFixture(); off.Settings.profile.alchemy.buy.on = false; off.Alchemy.startQueue(); assert.equal(off.AlchemyBuy.run, null);
+});
+test('alchemy buying: an item that runs out buys once more, then is skipped; Stop ends the visit', () => {
+  const f = buyFixture({ offers: [BUY_STR] }); f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14);
+  f.Settings.profile.alchemy.buy.stock.blue = 5;
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 60 && f.Alchemy.rowStatus.get(f.Settings.profile.alchemy.queue[0]) !== undefined && !/Skipped/.test(f.Alchemy.rowStatus.get(f.Settings.profile.alchemy.queue[0])); i++) f.step(1000);
+  assert.match(f.Alchemy.rowStatus.get(f.Settings.profile.alchemy.queue[0]), /Skipped: No selected weapon elixirs/);
+  assert.equal(f.stats.opens, 2, 'one visit at the start, one more when the item ran out, then no more');
+  assert.equal(f.stats.buys.length, 0, 'the merchant sells no elixir and Str is stocked');
+  assert.ok(f.Alchemy.log.some(l => /Not bought: weapon elixir \(not sold here\)/.test(l.text)));
+  const g = buyFixture(); g.Alchemy.startQueue(); g.step(); assert.ok(g.AlchemyBuy.run);
+  g.Alchemy.stop(); for (let i = 0; i < 10 && g.AlchemyBuy.run; i++) g.step();
+  assert.equal(g.AlchemyBuy.run, null); assert.equal(g.Alchemy.active(), false);
 });
 test('alchemy settings: old saves load with an empty queue, and saved rows get every goal', () => {
   const f = fixture();
