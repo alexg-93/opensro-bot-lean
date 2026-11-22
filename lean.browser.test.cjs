@@ -826,12 +826,13 @@ const server = http.createServer((req, res) => {
     });
     await page.getByRole('button', { name: 'Alchemy', exact: true }).click();
     await page.getByLabel('Item', { exact: true }).selectOption('13');
-    await page.getByLabel('Target +', { exact: true }).fill('1');
-    await page.getByLabel('Target +', { exact: true }).dispatchEvent('change');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await page.getByLabel('Target + (0 = leave the plus)', { exact: true }).fill('1');
+    await page.getByLabel('Target + (0 = leave the plus)', { exact: true }).dispatchEvent('change');
     await page.getByLabel('Maximum attempts', { exact: true }).fill('2');
     await page.getByLabel('Maximum attempts', { exact: true }).dispatchEvent('change');
     await page.getByLabel('Use lucky powder of matching degree', { exact: true }).check();
-    await page.getByRole('button', { name: 'Start alchemy', exact: true }).click();
+    await page.getByRole('button', { name: 'Start queue', exact: true }).click();
     await page.waitForFunction(() => testCommands.some(c => c.kind === 'alchemy-start'));
     assert.deepEqual(await page.evaluate(() => testCommands.find(c => c.kind === 'alchemy-start')), { kind: 'alchemy-start', mode: 'reinforce', slots: [13, 14, 15] });
     await page.evaluate(() => {

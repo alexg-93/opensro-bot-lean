@@ -257,7 +257,7 @@ const Town = {
       if (fromBag && this.needed(item)) return false;
       const key = BuffGear.key(item);
       if (BuffGear.cfg().buffSets.some(s => s.weapon === key || s.shield === key)) return false;
-      return !(fromBag && Alchemy.selected && Alchemy.selected.slot === item.slot);
+      return !(fromBag && Alchemy.protects(item));
     }
     if (!Number.isInteger(item.typeFlags) || !ItemType.isEquipment(item.typeFlags)) return false;
     const level = this.requiredLevel(item);
@@ -265,7 +265,7 @@ const Town = {
     if (splitList(c.keep).some(s => (item.name || '').toLowerCase().includes(s))) return false;
     const key = BuffGear.key(item);
     if (BuffGear.cfg().buffSets.some(s => s.weapon === key || s.shield === key)) return false;
-    return !(fromBag && Alchemy.selected && Alchemy.selected.slot === item.slot);
+    return !(fromBag && Alchemy.protects(item));
   },
   // Loot kept in the warehouse instead of being sold. Stones are also deposited from the character bag; elixirs are
   // not, because alchemy takes them from there.
@@ -297,7 +297,7 @@ const Town = {
   // weapons, armour, shields and accessories are sold. Pet summon scrolls, avatars, devil spirits, job suits,
   // fortress weapons, item mall and event items, tablets, powders and anything with an unknown codename stay.
   sellableBag(item) {
-    if (this.needed(item) || Alchemy.selected && Alchemy.selected.slot === item.slot) return false;
+    if (this.needed(item) || Alchemy.protects(item)) return false;
     const key = BuffGear.key(item);
     if (BuffGear.cfg().buffSets.some(s => s.weapon === key || s.shield === key)) return false;
     if (!this.sellable(item)) return false;

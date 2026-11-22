@@ -7973,6 +7973,190 @@ test('the stone fusion limit is optional: off by default, and a set limit stops 
   const g = stoneFixture(); g.Alchemy.cfg().stoneLimit = 3; g.Alchemy.start(true); g.Alchemy.run.stoneAttempts = 3; g.advance(1500); g.Controller.tick();
   assert.equal(g.Alchemy.run, null); assert.match(g.Alchemy.message, /Stopped after 3 stone fusions \(your limit\)/);
 });
+// Blue stones and the alchemy queue. The weapon at slot 13 is degree 9; D9 Str and Int stones are 6687 and 6699
+// (item type 3,3,11,1). Magic option params 70 and 76 are the D9 Str and Int rows.
+function blueFixture({ maxMagic = 4, stones = 5 } = {}) {
+  const f = alchemyFixture();
+  const refs = [{ paramId: 70, optionName: 'MATTR_STR' }, { paramId: 76, optionName: 'MATTR_INT' }, { paramId: 77, optionName: 'MATTR_LUCK' }];
+  f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 13 ? { ...i, magicReferences: refs, tooltip: { fields: { itemClass: 25, maxMagicOptions51c: maxMagic } } } : i);
+  f.World.gp.inventory.push({ slot: 20, refObjId: 6687, typeFlags: 0x0dec, quantity: stones }, { slot: 21, refObjId: 6699, typeFlags: 0x0dec, quantity: stones });
+  f.Alchemy.select(13);
+  const have = {};
+  // The game fuses one blue stone: the bag loses it and the item's option takes the rolled value.
+  f.blue = (slot, param, value, error = null) => {
+    const gp = f.World.gp; if (error === null || error === 0x23) { if (value !== undefined) have[param] = value; }
+    const used = error === null || error === 0x23;
+    const inventory = gp.inventory.map(i => used && i.slot === slot ? { ...i, quantity: i.quantity - 1 } : i.slot === 13 ? { ...i, magic: Object.entries(have).filter(([, v]) => v).map(([id, v]) => String((BigInt(v) << 32n) | BigInt(id))) } : i);
+    f.World.applyGameplay({ ...gp, inventory, inventoryPending: false, alchemy: { ...gp.alchemy, pending: false, flags: error === null ? 0x10 : 0, slot: 13, error } });
+    f.Controller.tick();
+  };
+  return f;
+}
+test('blue stones: the data has every blue with its D9 stone, values and items', () => {
+  const f = blueFixture(), A = f.Alchemy;
+  assert.equal(A.blueStone('MATTR_STR', 9).slot, 20, 'the D9 Str stone');
+  assert.deepEqual([...A.blueValues('MATTR_STR', 9)], [1, 2, 3, 4, 5, 6]);
+  const weapon = A.item();
+  assert.ok(A.blues(weapon).includes('MATTR_STR') && A.blues(weapon).includes('MATTR_HR'));
+  assert.equal(A.blues(weapon).includes('MATTR_HP'), false, 'HP does not go on weapons');
+  const helm = { ...weapon, typeFlags: 44 | (1 << 7) | (1 << 11) }, boots = { ...weapon, typeFlags: 44 | (1 << 7) | (6 << 11) };
+  assert.equal(A.kind(helm), 'armor'); assert.ok(A.blues(helm).includes('MATTR_HP'), 'HP goes on a helm');
+  assert.equal(A.blues(boots).includes('MATTR_HP'), false, 'but not on boots');
+  A.cfg().blue.targets.MATTR_STR = 99; assert.equal(A.blueTarget('MATTR_STR', A.cfg(), 9), 6, 'a goal above what the degree rolls is pulled down');
+});
+test('blue stones: fuses the D9 stone until the blue reaches its value, rolling it again when it comes out low', () => {
+  const f = blueFixture(); f.Settings.profile.alchemy.blue.targets.MATTR_STR = 4;
+  f.Alchemy.startBlues(); f.Controller.tick();
+  assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'magic', slots: [13, 20] });
+  for (let n = 0; n < 8; n++) { f.advance(100); f.Controller.tick(); }
+  assert.equal(f.commands.length, 1, 'nothing more is sent before the result');
+  f.blue(20, 70, 2); assert.match(f.Alchemy.message, /Str is now 2/);
+  f.advance(1500); f.Controller.tick(); assert.equal(f.commands.length, 2, 'below 4, so it is rolled again');
+  f.blue(20, 70, undefined, 0x23); assert.match(f.Alchemy.message, /fusion failed/);
+  f.advance(1500); f.Controller.tick(); assert.equal(f.commands.length, 3, 'a failed fusion goes on');
+  f.blue(20, 70, 5); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /Every wanted blue is reached/);
+  assert.equal(f.Alchemy.result.blueFused, 3); assert.equal(f.Alchemy.result.stoneFailures, 1);
+  assert.ok(f.Alchemy.log.some(l => /Str: 0 → 2/.test(l.text)));
+});
+test('blue stones: a new blue without a free slot is passed over, and a 0x22 refusal passes it over too', () => {
+  const full = blueFixture({ maxMagic: 0 }); full.Settings.profile.alchemy.blue.targets.MATTR_STR = 1;
+  full.Alchemy.startBlues(); full.Controller.tick();
+  assert.equal(full.commands.filter(c => c.kind === 'alchemy-start').length, 0, 'nothing is sent');
+  assert.match(full.Alchemy.message, /No free magic slot for Str/);
+  const f = blueFixture(); f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 13 ? { ...i, tooltip: { fields: { itemClass: 25 } } } : i);
+  Object.assign(f.Settings.profile.alchemy.blue.targets, { MATTR_STR: 1, MATTR_INT: 1 });
+  f.Alchemy.startBlues(); f.Controller.tick(); assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'magic', slots: [13, 20] }, 'the slot count is unknown, so it is tried');
+  f.blue(20, 70, undefined, 0x22); assert.ok(f.Alchemy.run, 'not a stop');
+  f.advance(1500); f.Controller.tick(); assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'magic', slots: [13, 21] }, 'Int is done instead');
+  f.blue(21, 76, 3); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /Every wanted blue is reached/);
+  const other = blueFixture(); other.Settings.profile.alchemy.blue.targets.MATTR_STR = 1; other.Alchemy.startBlues(); other.Controller.tick();
+  other.blue(20, 70, undefined, 0x21); assert.equal(other.Alchemy.run, null, 'other refusals still stop'); assert.match(other.Alchemy.message, /refused by the game \(code 33/);
+});
+test('blue stones: running out stops with the stones named, and a blue stone limit stops the run', () => {
+  const f = blueFixture({ stones: 1 }); f.Settings.profile.alchemy.blue.targets.MATTR_STR = 6;
+  f.Alchemy.startBlues(); f.Controller.tick(); f.blue(20, 70, 2); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /No Str stone of degree 9 in the bag/);
+  const g = blueFixture(); g.Settings.profile.alchemy.blue = { targets: { MATTR_STR: 6 }, limit: 2 };
+  g.Alchemy.startBlues(); g.Controller.tick(); g.blue(20, 70, 1); g.advance(1500); g.Controller.tick(); g.blue(20, 70, 1); g.advance(1500); g.Controller.tick();
+  assert.equal(g.Alchemy.run, null); assert.match(g.Alchemy.message, /Stopped after 2 blue stones/);
+});
+// Two weapons in the queue: the first wants +1, the second wants Str. Elixirs at 14, powder at 15, Str stones at 20.
+function queueFixture() {
+  const f = blueFixture();
+  f.World.gp.inventory.push({ slot: 22, refObjId: 101, typeFlags: 44 | (6 << 7), plus: 0, durability: 100, variance: '0', magic: [], quantity: 1, name: 'Second weapon',
+    magicReferences: [{ paramId: 70, optionName: 'MATTR_STR' }], tooltip: { fields: { itemClass: 25, maxMagicOptions51c: 4 } } });
+  const A = f.Alchemy, cfg = f.Settings.profile.alchemy;
+  cfg.target = 0; A.addRow(13); A.addRow(22);
+  cfg.queue[0].goals.target = 1; cfg.queue[1].goals.blue.targets.MATTR_STR = 1;
+  // The second weapon's Str stone: the bag loses it and the weapon gets Str 3.
+  f.blue22 = () => {
+    const gp = f.World.gp;
+    const inventory = gp.inventory.map(i => i.slot === 20 ? { ...i, quantity: i.quantity - 1 } : i.slot === 22 ? { ...i, magic: [String((3n << 32n) | 70n)] } : i);
+    f.World.applyGameplay({ ...gp, inventory, inventoryPending: false, alchemy: { ...gp.alchemy, pending: false, flags: 0x10, slot: 22, error: null } });
+    f.Controller.tick();
+  };
+  return f;
+}
+test('alchemy queue: items are done in order, Plus then White then Blue, and the queue closes the window at the end', () => {
+  const f = queueFixture(), A = f.Alchemy, cfg = f.Settings.profile.alchemy;
+  assert.deepEqual([...cfg.queue.map(r => r.slot)], [13, 22]);
+  assert.equal(cfg.queue[0].goals === cfg.queue[1].goals, false, 'each row has its own goals');
+  A.startQueue(); f.Controller.tick();
+  assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'reinforce', slots: [13, 14] }, 'the first item is enhanced first');
+  assert.equal(A.rowStatus.get(cfg.queue[0]), 'Running: Plus');
+  f.result(0x10, 1);
+  assert.equal(A.run, null); assert.ok(A.queue, 'the queue goes on');
+  assert.equal(A.rowStatus.get(cfg.queue[0]), 'Plus done');
+  f.Controller.tick(); assert.equal(f.commands.filter(c => c.kind === 'alchemy-start').length, 1, 'the delay runs first');
+  f.advance(1500); f.Controller.tick(); assert.equal(A.rowStatus.get(cfg.queue[0]), 'Done', 'nothing else to do on it');
+  f.advance(1500); f.Controller.tick();
+  assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'magic', slots: [22, 20] }, 'then the second item\'s blue');
+  f.blue22(); f.advance(1500); f.Controller.tick(); f.advance(1500); f.Controller.tick();
+  assert.equal(A.queue, null); assert.match(A.message, /Queue finished: 2 done\./);
+  assert.equal(f.commands.at(-1).kind, 'alchemy-close');
+  assert.equal(A.result.elixirs, 1); assert.equal(A.result.blueFused, 1, 'the results add up over the queue');
+});
+test('alchemy queue: an item out of materials is skipped, or the queue stops when asked', () => {
+  const f = queueFixture(); f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14);
+  f.Alchemy.startQueue(); f.Controller.tick();
+  assert.match(f.Alchemy.rowStatus.get(f.Settings.profile.alchemy.queue[0]), /Skipped: No selected weapon elixirs/);
+  f.advance(1500); f.Controller.tick();
+  assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'magic', slots: [22, 20] }, 'the next item is done');
+  const g = queueFixture(); g.World.gp.inventory = g.World.gp.inventory.filter(i => i.slot !== 14); g.Settings.profile.alchemy.onMissing = 'stop';
+  g.Alchemy.startQueue(); g.Controller.tick();
+  assert.equal(g.Alchemy.queue, null); assert.match(g.Alchemy.message, /Test weapon: No selected weapon elixirs/);
+  assert.equal(g.commands.filter(c => c.kind === 'alchemy-start').length, 0);
+});
+test('alchemy queue: an item no longer in its bag slot is passed over', () => {
+  const f = queueFixture(); f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 13 ? { ...i, slot: 30 } : i);
+  f.Alchemy.startQueue(); f.Controller.tick();
+  assert.match(f.Alchemy.rowStatus.get(f.Settings.profile.alchemy.queue[0]), /Skipped: Not in bag slot 13/);
+});
+test('alchemy queue: manual control, editing the running item\'s goals and a reset stop the whole queue', () => {
+  const f = queueFixture(); f.Alchemy.startQueue(); f.Controller.tick(); f.result(0x10, 1);
+  f.Manual.lastAt = 999999; f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.queue, null, 'stopped between two steps'); assert.equal(f.commands.filter(c => c.kind === 'alchemy-start').length, 1);
+  const g = queueFixture(); g.Alchemy.startQueue(); g.Controller.tick(); g.result(0x10, 1); g.advance(1500); g.Controller.tick();
+  g.advance(1500); g.Controller.tick(); assert.equal(g.commands.at(-1).mode, 'magic');
+  g.Settings.profile.alchemy.queue[1].goals.blue.targets.MATTR_STR = 6; g.advance(100); g.Controller.tick();
+  assert.equal(g.Alchemy.queue, null); assert.match(g.Alchemy.message, /settings, character or manual control changed/);
+  const h = queueFixture(); h.Alchemy.startQueue(); h.Controller.tick(); h.bus.emit('reset');
+  assert.equal(h.Alchemy.queue, null); assert.equal(h.Alchemy.active(), false);
+  assert.equal(h.Alchemy.rowStatus.get(h.Settings.profile.alchemy.queue[0]), 'Stopped');
+});
+test('alchemy queue: rows are added once, kept in order and locked while it runs; other features see it as busy', () => {
+  const f = queueFixture(), A = f.Alchemy, rows = () => [...f.Settings.profile.alchemy.queue.map(r => r.slot)];
+  A.addRow(13); assert.deepEqual(rows(), [13, 22], 'an item is added once');
+  A.addRow(14); assert.deepEqual(rows(), [13, 22], 'only gear');
+  A.moveRow(1, -1); assert.deepEqual(rows(), [22, 13]); assert.equal(A.editRow, 0);
+  A.startQueue(); A.removeRow(0); A.moveRow(0, 1); assert.deepEqual(rows(), [22, 13], 'locked while it runs');
+  assert.equal(A.active(), true); A.run = null; assert.equal(A.active(), true, 'between steps too');
+  A.stop(); A.removeRow(0); assert.deepEqual(rows(), [13]);
+});
+test('queued alchemy items are kept in the bag like the selected one', () => {
+  const f = queueFixture(), A = f.Alchemy, second = f.World.items().find(i => i.slot === 22);
+  A.selected = null;
+  assert.equal(A.protects(second), true, 'a queued item');
+  assert.equal(A.protects({ ...second, refObjId: 999 }), false, 'another item in that slot is not');
+  assert.equal(A.protects(f.World.items().find(i => i.slot === 14)), false, 'elixirs are not');
+  A.select(13); A.removeRow(0); assert.equal(A.protects(f.World.items().find(i => i.slot === 13)), true, 'the selected item still is');
+});
+test('alchemy settings: old saves load with an empty queue, and saved rows get every goal', () => {
+  const f = fixture();
+  const old = f.botProfile({ alchemy: { target: 5, limit: 30 } }).alchemy;
+  assert.deepEqual([...old.queue], []); assert.equal(old.target, 5); assert.equal(old.delay, 1000); assert.equal(old.onMissing, 'next');
+  const saved = f.botProfile({ alchemy: { delay: 50, onMissing: 'x', queue: [{ refObjId: 100, slot: 13, goals: { target: 7, blue: { targets: { MATTR_INT: 3 } } } }, { slot: 'x' }, null] } }).alchemy;
+  assert.equal(saved.queue.length, 1, 'broken rows are dropped'); assert.equal(saved.delay, 500); assert.equal(saved.onMissing, 'next');
+  const goals = saved.queue[0].goals;
+  assert.equal(goals.target, 7); assert.equal(goals.blue.targets.MATTR_INT, 3); assert.equal(goals.blue.limit, 100);
+  assert.equal(goals.limit, 20); assert.ok(goals.use && goals.attr && goals.from, 'missing goals take the defaults');
+  assert.equal('queue' in goals, false);
+});
+test('the alchemy tab draws the queue, the three goal tabs and the bag', () => {
+  const nodes = [];
+  const document = { createElement(tag) {
+    const events = {}, node = { tag, children: [], className: '', value: '', dataset: {}, style: {}, isConnected: true,
+      classList: { add() {} }, setAttribute() {}, append(...children) { this.children.push(...children); }, replaceChildren(...children) { this.children = children; },
+      addEventListener(name, fn) { events[name] = fn; }, click() { events.click?.(); }, querySelectorAll() { return []; } };
+    nodes.push(node); return node;
+  } };
+  const f = fixture(document); f.UI.draw = () => {}; f.UI.is = page => page === 'Alchemy'; f.Icons.paint = () => {}; f.UI.soundPicker = () => document.createElement('div');
+  f.World.gp.alchemy = { visible: true, pending: false, mode: 'reinforce', flags: 0, error: null, slot: null };
+  f.World.gp.inventory = [{ slot: 13, refObjId: 100, typeFlags: 44 | (6 << 7), plus: 2, durability: 100, variance: '0', magic: [], quantity: 1, name: 'Test weapon',
+    magicReferences: [], tooltip: { fields: { itemClass: 25, maxMagicOptions51c: 3 } } }, { slot: 20, refObjId: 6687, typeFlags: 0x0dec, quantity: 4 }];
+  const text = n => n.textContent ?? '';
+  for (const tab of ['plus', 'white', 'blue']) {
+    nodes.length = 0; f.UI.pane = document.createElement('div'); f.Alchemy.goalsTab = tab; f.Alchemy.draw();
+    assert.ok(nodes.some(n => text(n) === 'Alchemy queue') && nodes.some(n => text(n) === 'Start queue'), tab);
+  }
+  f.Alchemy.addRow(13); nodes.length = 0; f.UI.pane = document.createElement('div'); f.Alchemy.goalsTab = 'blue'; f.Alchemy.draw();
+  assert.ok(nodes.some(n => text(n) === 'Test weapon +2 → +3'), 'the queue line, with the plus goal new rows start with');
+  assert.ok(nodes.some(n => /^Str \(now –, 4 in bag\)$/.test(text(n))), 'the Str goal row');
+  assert.ok(nodes.some(n => /Magic slots: 0 of 3 used/.test(text(n))));
+  assert.ok(nodes.some(n => /For degree 9: .*blue stones 4/.test(text(n))), 'the bag line');
+});
 require('./lean.obstacle.test.cjs')({ fixture, combatFixture, navProduct, test });
 
 test('with Accept resurrection on, a living party member in view makes the bot wait 20 s before reviving itself', () => {

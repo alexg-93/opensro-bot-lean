@@ -10,7 +10,12 @@ const DEFAULT_PROFILE = {
     // Luck and lucky powder help at every plus, and Astral keeps +4 on a failure.
     from: { powder: 0, luck: 0, steady: 5, immortal: 5, astral: 4 },
     // Attribute percentages: the lowest variance value (0 to 31) wanted per NATTR_ name, 0 or missing = leave it alone.
-    attr: { targets: {}, limit: 100 } },
+    attr: { targets: {}, limit: 100 },
+    // Blue (magic) options: the lowest value wanted per MATTR_ name, 0 or missing = leave it alone.
+    blue: { targets: {}, limit: 100 },
+    // The alchemy queue (lean-alchemy.js): items done one after another, each with its own goals (the fields above, copied
+    // when the item is added). onMissing: 'next' moves on when an item runs out of materials, 'stop' stops the queue.
+    queue: [], delay: 1000, onMissing: 'next', queueSound: false },
   statPoints: { enabled: false, str: 1, int: 0, reserve: 0 },
   // Zero-setup leveling (lean-leveling.js): spots from the game data and NPC gear upgrades.
   leveling: { on: false, spots: true, gear: true, accessories: true, sellOld: true, move: true, reserve: 5000, skills: true, prepared: '', added: [], elements: '', imbued: [], pet: '', build: 'auto', weapon: null },
@@ -75,6 +80,14 @@ const DEFAULT_PROFILE = {
   // control: the dashboard may start and stop this character (off unless the player turns it on).
   live: { on: false, seconds: 10, control: false },
 };
+// The goals of one alchemy queue row: the single-item fields of DEFAULT_PROFILE.alchemy (target +, stones, white and blue
+// targets), without the queue's own fields.
+const ALCHEMY_GOAL_FIELDS = ['target', 'limit', 'elixir', 'powder', 'use', 'stones', 'stoneLimit', 'from', 'attr', 'blue'];
+function alchemyGoals(input) {
+  const goals = {};
+  for (const field of ALCHEMY_GOAL_FIELDS) goals[field] = deepMerge(DEFAULT_PROFILE.alchemy[field], input && typeof input === 'object' ? input[field] : undefined);
+  return goals;
+}
 // Preserve only bot settings. The original assistant's settings are never changed.
 function botProfile(input) {
   const result = deepMerge(DEFAULT_PROFILE, {});
@@ -138,6 +151,12 @@ function botProfile(input) {
   if (oldStones && !input.alchemy?.use) for (const key of Object.keys(result.alchemy.use)) {
     const n = Number(oldStones[key]) || 0; result.alchemy.use[key] = n > 0; result.alchemy.stones[key] = Math.min(6, Math.max(1, n));
   }
+  // The alchemy queue: keep well-formed rows only, each with a full set of goals.
+  result.alchemy.queue = (Array.isArray(result.alchemy.queue) ? result.alchemy.queue : []).filter(row => row && Number.isInteger(row.refObjId) && Number.isInteger(row.slot))
+    .slice(0, 40).map(row => ({ refObjId: row.refObjId, slot: row.slot, goals: alchemyGoals(row.goals) }));
+  if (!Number.isInteger(result.alchemy.delay)) result.alchemy.delay = DEFAULT_PROFILE.alchemy.delay;
+  result.alchemy.delay = Math.min(10000, Math.max(500, result.alchemy.delay));
+  if (!['next', 'stop'].includes(result.alchemy.onMissing)) result.alchemy.onMissing = 'next';
   // A character wears one shield: the old primary and secondary shield become that one, the primary first.
   const gear = result.items.gear, oldGear = input.items?.gear;
   if (oldGear && typeof oldGear === 'object' && !('shield' in oldGear)) gear.shield = [oldGear.primaryShield, oldGear.secondaryShield].find(k => typeof k === 'string' && k) || null;

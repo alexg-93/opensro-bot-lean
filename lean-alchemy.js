@@ -31,8 +31,24 @@ const ATTRIBUTE_LABEL = {
 // item's own magic limit caps it), so the value is one of these; each step needs every roll to reach it.
 const ATTRIBUTE_STEPS = [[7, 22], [13, 41], [19, 61], [25, 80], [31, 100]];
 const STONE_FAILED = 0x23;
+// Blue (magic) options a stone adds (item type 3,3,11,1, the same "magic" request as the Luck stones). The ids, the values
+// a success can roll and the items each fits come from ALCHEMY_DATA (gen-alchemy.py). A blue already on the item is rolled
+// again on success (it can come out lower); a new one needs a free magic slot, which the Luck/Steady/Immortal/Astral charges
+// share. The item's slot count is its reference's maximum, plus one for each of these two options (alchemy stones.go magicLimit).
+const BLUE_LABEL = {
+  MATTR_STR: 'Str', MATTR_INT: 'Int', MATTR_DUR: 'Durability', MATTR_HR: 'Attack rate', MATTR_EVADE_BLOCK: 'Ignore block',
+  MATTR_EVADE_CRITICAL: 'Block critical', MATTR_ER: 'Parry rate', MATTR_HP: 'HP', MATTR_MP: 'MP', MATTR_RESIST_FROSTBITE: 'Freeze resistance',
+  MATTR_RESIST_ESHOCK: 'Shock resistance', MATTR_RESIST_BURN: 'Burn resistance', MATTR_RESIST_POISON: 'Poison resistance', MATTR_RESIST_ZOMBIE: 'Zombie resistance',
+};
+const MAGIC_SLOT_EXTRA = ['MATTR_DEC_MAXDUR', 'MATTR_NOT_REPARABLE'];
+// Refusals that only mean "this blue cannot go on this item": the queue passes over that blue and does the others.
+const BLUE_SKIP_REFUSALS = [9, 0x22];
+// The steps of one queued item, in this order: blues last, because a white stone that works can roll a blue again.
+const QUEUE_STEPS = ['plus', 'white', 'blue'];
+const STEP_LABEL = { plus: 'Plus', white: 'White', blue: 'Blue' };
 const Alchemy = {
-  windowOwner: null, selected: null, run: null, pending: null, result: null, message: 'Select an item from your bag to begin.', started: false,
+  windowOwner: null, selected: null, run: null, pending: null, result: null, message: 'Add an item from your bag to the queue to begin.', started: false,
+  queue: null, editRow: 0, goalsTab: 'plus', rowStatus: new WeakMap(),
   cfg() { return Settings.profile.alchemy; },
   // The server's enhancement families (alchemy catalog.go category()): weapon, shield, accessory and armor. An elixir is
   // refused (0x09) for any other family.
@@ -94,6 +110,47 @@ const Alchemy = {
     if (!skipped.length) return null;
     const names = skipped.map(name => ATTRIBUTE_LABEL[name]);
     return { missing: `No ${names.length > 1 ? names.slice(0, -1).join(', ') + ' or ' + names.at(-1) : names[0]} stone of degree ${degree} in the bag.`, skipped };
+  },
+  // Blues. The body part matters for armour: HP and MP fit only helm, mail and pants (alchemy catalog.go Allows).
+  armorPart(i) { return { 1: 'helm', 3: 'mail', 4: 'pants' }[(i.typeFlags >>> 11) & 31] || ''; },
+  blues(item) {
+    const kind = this.kind(item), part = kind === 'armor' ? this.armorPart(item) : '';
+    return Object.keys(BLUE_LABEL).filter(name => ALCHEMY_DATA.blues?.[name]?.cats.some(c => c === kind || part && c === part));
+  },
+  // The values a success can roll at the item's degree, lowest first.
+  blueValues(name, degree) { return ALCHEMY_DATA.blues?.[name]?.values?.[degree] || []; },
+  // The wanted value, pulled into what the degree can roll (a goal picked on another item may be above it).
+  blueTarget(name, cfg = this.cfg(), degree = 0) {
+    const want = Math.max(0, Math.floor(Number(cfg.blue?.targets?.[name])) || 0), values = this.blueValues(name, degree);
+    return want && values.length ? Math.min(want, values.at(-1)) : want;
+  },
+  // Magic slots: used, and the item's limit when its reference says (null when unknown; the server still refuses with 0x22).
+  magicSlots(item) {
+    const max = item?.tooltip?.fields?.maxMagicOptions51c, used = (item?.magic || []).length;
+    if (!Number.isInteger(max)) return { used, limit: null };
+    const extra = MAGIC_SLOT_EXTRA.reduce((n, option) => n + (this.attributeCount(item, option) > 0 ? 1 : 0), 0);
+    return { used, limit: Math.min(12, max + extra) };
+  },
+  blueStone(name, degree) {
+    const ref = ALCHEMY_DATA.magicStones?.[name] + degree - 1;
+    return World.items().find(i => i.refObjId === ref && (i.typeFlags & 0xfffe) === 0x0dec && i.quantity > 0 && i.slot >= 13);
+  },
+  // The first blue below its wanted value with a bag stone of the item's degree. A blue that cannot go on (no free slot, or
+  // the game refused it: `skipped`) is passed over; with none left, `missing` names the stones that ran out.
+  nextBlue(item, cfg = this.cfg(), skipped = []) {
+    const degree = this.degree(item), slots = this.magicSlots(item), noStone = [], full = [];
+    for (const name of this.blues(item)) {
+      const target = this.blueTarget(name, cfg, degree);
+      if (!target || skipped.includes(name) || this.attributeCount(item, name) >= target) continue;
+      if (!this.attributeCount(item, name) && slots.limit !== null && slots.used >= slots.limit) { full.push(name); continue; }
+      const stone = this.blueStone(name, degree);
+      if (stone) return { name, item: stone, full };
+      noStone.push(name);
+    }
+    if (!noStone.length && !full.length) return null;
+    const list = names => names.map(n => BLUE_LABEL[n]).join(', ');
+    // Only "no free slot" left is the end of what can be done, not a shortage.
+    return { missing: noStone.length ? `No ${list(noStone)} stone of degree ${degree} in the bag.` : `No free magic slot for ${list(full)}.`, full, noSlot: !noStone.length };
   },
   // About how many stones one wanted value takes: a fusion works half the time (the stone's own chance, before skill and
   // avatar bonuses) and then the new value reaches step k only when all four rolls do, ((6 - k) / 6)^4, if the item allows it.
@@ -176,53 +233,83 @@ const Alchemy = {
     if (Restock.activeShop() || gp.storage || gp.exchange?.open || gp.exchange?.requesting || gp.stall?.phase && gp.stall.phase !== 'none') return 'Close shop, storage, trade and stall first.';
     return '';
   },
-  start(stonesOnly = false) {
-    if (this.run) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
-    const error = this.blocked(), gp = World.gp, item = this.item(), c = this.cfg();
-    const reject = text => { this.message = text; UI.toast(text, 'warn'); };
-    if (error) return reject(error);
-    if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return reject('Wait for known, settled inventory and alchemy state.');
-    if (!this.gear(item) || this.fingerprint(item) !== this.selected?.fingerprint) return reject('Weapon changed or moved. Select it again.');
-    const wants = this.wanted(c);
-    if (stonesOnly && !wants.length) return reject('Tick at least one stone type first (Use Luck, Steady, Immortal or Astral).');
-    if (wants.length && !this.degree(item)) return reject('Weapon degree is unknown; cannot choose matching stones.');
-    if (wants.length && !this.attributesKnown(item)) return reject('The weapon\'s attributes are not loaded yet. Try again in a moment.');
-    if (!stonesOnly) {
-    if (!Number.isInteger(c.target) || c.target < 1 || c.target > 250 || !Number.isInteger(c.limit) || c.limit < 1 || c.limit > ALCHEMY_MAX_ATTEMPTS) return reject(`Set target + from 1 to 250 and attempts from 1 to ${ALCHEMY_MAX_ATTEMPTS}.`);
-    if (item.plus >= c.target) return reject('Weapon already meets the target +.');
-    const materials = this.materials(item);
-    if (!materials.elixir) return reject(`No selected ${this.kind(item)} elixirs in the bag.`);
-    if (materials.wantPowder && !this.degree(item)) return reject('Weapon degree is unknown; cannot choose compatible lucky powder.');
-    if (materials.wantPowder && !materials.powder) return reject('No lucky powder matching this weapon degree.');
+  // The goal fields a run reads (the queue's own fields are left out, so editing the queue does not stop a run).
+  goalsKey(cfg) { return JSON.stringify(['target', 'limit', 'elixir', 'powder', 'use', 'stones', 'stoneLimit', 'from', 'attr', 'blue'].map(f => cfg?.[f])); },
+  // Checks one step on `item` with the goals `cfg` and, when every check passes, starts it: 'plus' (enhancement, with the
+  // helper stones first), 'attr' (white stats) or 'blue'. Returns '' when started, else { error, wait, missing }: `wait` means
+  // the reason clears by itself, `missing` that materials ran out.
+  begin(kind, item, cfg, { stonesOnly = false, goalsOf = () => this.cfg(), queued = false } = {}) {
+    const error = this.blocked(), gp = World.gp, word = kind === 'plus' ? 'Weapon' : 'Item';
+    if (error) return { error };
+    if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return { error: 'Wait for known, settled inventory and alchemy state.', wait: true };
+    if (kind === 'plus') {
+      const wants = this.wanted(cfg);
+      if (stonesOnly && !wants.length) return { error: 'Tick at least one stone type first (Use Luck, Steady, Immortal or Astral).' };
+      if (wants.length && !this.degree(item)) return { error: 'Weapon degree is unknown; cannot choose matching stones.' };
+      if (wants.length && !this.attributesKnown(item)) return { error: 'The weapon\'s attributes are not loaded yet. Try again in a moment.', wait: true };
+      if (!stonesOnly) {
+        if (!Number.isInteger(cfg.target) || cfg.target < 1 || cfg.target > 250 || !Number.isInteger(cfg.limit) || cfg.limit < 1 || cfg.limit > ALCHEMY_MAX_ATTEMPTS) return { error: `Set target + from 1 to 250 and attempts from 1 to ${ALCHEMY_MAX_ATTEMPTS}.` };
+        if (item.plus >= cfg.target) return { error: 'Weapon already meets the target +.' };
+        const materials = this.materials(item, cfg);
+        if (!materials.elixir) return { error: `No selected ${this.kind(item)} elixirs in the bag.`, missing: true };
+        if (materials.wantPowder && !this.degree(item)) return { error: 'Weapon degree is unknown; cannot choose compatible lucky powder.' };
+        if (materials.wantPowder && !materials.powder) return { error: 'No lucky powder matching this weapon degree.', missing: true };
+      }
+    } else {
+      if (!this.degree(item)) return { error: 'Item degree is unknown; cannot choose matching stones.' };
+      if (kind === 'attr') {
+        if (item.variance === undefined) return { error: 'The item\'s stats are not loaded yet. Try again in a moment.', wait: true };
+        if (!this.attributes(this.kind(item)).some(a => this.attrTarget(a.name, cfg))) return { error: 'Pick at least one attribute percentage to aim for first.' };
+        if (!this.nextAttr(item, cfg)) return { error: 'The item already has every wanted percentage.' };
+      } else {
+        if (!this.attributesKnown(item)) return { error: 'The item\'s blues are not loaded yet. Try again in a moment.', wait: true };
+        if (!this.blues(item).some(name => this.blueTarget(name, cfg, this.degree(item)))) return { error: 'Pick at least one blue to aim for first.' };
+        if (!this.nextBlue(item, cfg)) return { error: 'The item already has every wanted blue.' };
+      }
     }
-    this.run = { slot: item.slot, identity: this.identity(item), fingerprint: this.fingerprint(item), stonesOnly,
-      cfg: { ...c }, config: JSON.stringify(c), manualAt: Manual.lastAt, character: World.charName,
-      attempts: 0, successes: 0, failures: 0, destroyed: 0, highest: item.plus, elixirs: 0, powders: 0, stoneAttempts: 0, stoneFailures: 0, stonesUsed: { luck: 0, steady: 0, immortal: 0, astral: 0 }, nextAt: now(), opening: null };
-    this.result = this.run; this.message = 'Preparing alchemy.';
-    this.note(stonesOnly ? 'Started fusing stones.' : `Started: ${item.name || Items.name(item.refObjId)} +${item.plus} to +${c.target}.`);
-  },
-  // Fuse attribute stones until every wanted percentage is reached (or the stones or the limit run out).
-  startAttributes() {
-    if (this.run) return;
-    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
-    const error = this.blocked(), gp = World.gp, item = this.item(), c = this.cfg();
-    const reject = text => { this.message = text; UI.toast(text, 'warn'); };
-    if (error) return reject(error);
-    if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return reject('Wait for known, settled inventory and alchemy state.');
-    if (!this.gear(item) || this.fingerprint(item) !== this.selected?.fingerprint) return reject('Item changed or moved. Select it again.');
-    if (!this.degree(item)) return reject('Item degree is unknown; cannot choose matching stones.');
-    if (item.variance === undefined) return reject('The item\'s stats are not loaded yet. Try again in a moment.');
-    if (!this.attributes(this.kind(item)).some(a => this.attrTarget(a.name, c))) return reject('Pick at least one attribute percentage to aim for first.');
-    if (!this.nextAttr(item, c)) return reject('The item already has every wanted percentage.');
-    this.run = { kind: 'attr', slot: item.slot, identity: this.identity(item), shape: JSON.stringify([item.slot, item.refObjId, item.typeFlags]), fingerprint: this.fingerprint(item), stonesOnly: false,
-      cfg: JSON.parse(JSON.stringify(c)), config: JSON.stringify(c), manualAt: Manual.lastAt, character: World.charName,
-      attempts: 0, successes: 0, failures: 0, destroyed: 0, highest: item.plus, elixirs: 0, powders: 0, stoneAttempts: 0, stoneFailures: 0, attrFused: 0,
+    this.run = { kind, slot: item.slot, identity: this.identity(item), shape: this.shape(item), fingerprint: this.fingerprint(item), stonesOnly,
+      cfg: JSON.parse(JSON.stringify(cfg)), config: this.goalsKey(cfg), goalsOf, queued, manualAt: Manual.lastAt, character: World.charName,
+      attempts: 0, successes: 0, failures: 0, destroyed: 0, highest: item.plus, elixirs: 0, powders: 0, stoneAttempts: 0, stoneFailures: 0, attrFused: 0, blueFused: 0,
       stonesUsed: { luck: 0, steady: 0, immortal: 0, astral: 0 }, nextAt: now(), opening: null, skipped: [] };
-    this.result = this.run; this.message = 'Preparing attribute stones.';
-    this.note(`Started attribute stones on ${item.name || Items.name(item.refObjId)}.`);
+    if (!queued) this.result = this.run;
+    const name = item.name || Items.name(item.refObjId);
+    this.message = kind === 'plus' ? 'Preparing alchemy.' : kind === 'attr' ? 'Preparing attribute stones.' : 'Preparing blue stones.';
+    this.note(kind === 'attr' ? `Started attribute stones on ${name}.` : kind === 'blue' ? `Started blue stones on ${name}.` : stonesOnly ? 'Started fusing stones.' : `Started: ${name} +${item.plus} to +${cfg.target}.`);
+    return '';
   },
+  shape(item) { return JSON.stringify([item.slot, item.refObjId, item.typeFlags]); },
+  // The single-item buttons (and the tests) start a step on the selected item with the tab's own settings.
+  startSelected(kind, stonesOnly = false) {
+    if (this.run || this.queue) return;
+    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    const item = this.item(), reject = text => { this.message = text; UI.toast(text, 'warn'); };
+    const blocked = this.blocked(), gp = World.gp; if (blocked) return reject(blocked);
+    if (gp.inventoryPending || !gp.alchemy || gp.alchemy.pending) return reject('Wait for known, settled inventory and alchemy state.');
+    if (!this.gear(item) || this.fingerprint(item) !== this.selected?.fingerprint) return reject(kind === 'plus' ? 'Weapon changed or moved. Select it again.' : 'Item changed or moved. Select it again.');
+    const result = this.begin(kind, item, this.cfg(), { stonesOnly });
+    if (result) reject(result.error);
+  },
+  start(stonesOnly = false) { this.startSelected('plus', stonesOnly); },
+  // Fuse attribute stones until every wanted percentage is reached (or the stones or the limit run out).
+  startAttributes() { this.startSelected('attr'); },
+  startBlues() { this.startSelected('blue'); },
+  // The normal end of one step: the goal is reached ('done') or materials ran out ('missing'). Alone it stops alchemy
+  // as before; in the queue the queue moves on.
+  end(reason, how = 'done') {
+    const r = this.run;
+    if (!r?.queued || !this.queue) return this.stop(reason);
+    this.addTotals(this.queue.totals, r);
+    this.note(reason); this.run = null; this.message = reason;
+    this.queueStepEnded(reason, how);
+  },
+  delay() { return Math.min(10000, Math.max(500, Math.floor(Number(this.cfg().delay)) || 1000)); },
   stop(reason = 'Alchemy stopped. An attempt already sent may still finish.') {
+    if (this.queue) {
+      const q = this.queue; this.queue = null;
+      if (this.run?.queued) this.addTotals(q.totals, this.run);
+      if (q.row) this.rowStatus.set(q.row, 'Stopped');
+      if (!this.run) { this.note(reason); this.message = reason; }
+    }
     if (this.run) { this.note(reason); this.run = null; this.message = reason; }
     // Close only a session we opened/used, on the same character. Native close
     // does not cancel reinforcement; keep the pending result until confirmed.
@@ -234,8 +321,8 @@ const Alchemy = {
     if (this.started) return; this.started = true;
     // All manual native gameplay commands can interfere with the selected bag.
     // Our own Cmd.raw bypasses these observers, as with combat/manual pause.
-    Hook.observers.push(command => { if (command.kind === 'gameplay' && this.run) this.stop('Alchemy stopped by manual game control.'); });
-    bus.on('game-error', text => { if (this.run && /alchemy|inventory process/i.test(String(text))) this.stop('Alchemy stopped after a game refusal; wait for the inventory to settle.'); });
+    Hook.observers.push(command => { if (command.kind === 'gameplay' && (this.run || this.queue)) this.stop('Alchemy stopped by manual game control.'); });
+    bus.on('game-error', text => { if ((this.run || this.queue) && /alchemy|inventory process/i.test(String(text))) this.stop('Alchemy stopped after a game refusal; wait for the inventory to settle.'); });
     bus.on('reset', () => { this.windowOwner = null; this.stop('Alchemy stopped after world reset.'); this.pending = null; this.selected = null; });
   },
   observe() {
@@ -248,6 +335,11 @@ const Alchemy = {
     if (a !== p.before && a.error !== null && a.error !== undefined) {
       // A failed stone fusion is answered like a refusal (0x23), but the stone is gone: it is a result, not a stop.
       if (p.stone && a.error === STONE_FAILED) return this.observeStone(p, gp, true);
+      // A blue that cannot go on this item (wrong kind, no free slot) is passed over; the others are still done.
+      if (p.stone?.kind === 'blue' && BLUE_SKIP_REFUSALS.includes(a.error) && this.run === p.run) {
+        this.pending = null; p.run.skipped.push(p.stone.blue); p.run.nextAt = now() + this.delay();
+        this.note(`${BLUE_LABEL[p.stone.blue]} cannot go on this item (code ${a.error}); going on with the other blues.`); return;
+      }
       this.pending = null; this.stop(p.stone ? this.stoneRefusal(a.error) : 'Alchemy refused by the game (code ' + a.error + ').'); return;
     }
     if (p.stone) return this.observeStone(p, gp);
@@ -274,11 +366,11 @@ const Alchemy = {
     if (item) p.run.highest = Math.max(p.run.highest, item.plus);
     if (outcome === 0x40) { this.selected = null; this.stop('Weapon destroyed; alchemy stopped.'); this.message = 'Weapon destroyed; alchemy stopped.'; return; }
     p.run.fingerprint = this.fingerprint(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
-    p.run.nextAt = now() + 1000;
+    p.run.nextAt = now() + this.delay();
     if (this.run !== p.run) return;
     this.message = outcome === 0x10 ? 'Success: weapon is now +' + item.plus + '.' : 'Failed attempt: weapon is now +' + item.plus + '.';
-    if (item.plus >= p.run.cfg.target) this.stop('Target reached: +' + item.plus + '.');
-    else if (p.run.attempts >= p.run.cfg.limit) this.stop('Attempt limit reached.');
+    if (item.plus >= p.run.cfg.target) this.end('Target reached: +' + item.plus + '.');
+    else if (p.run.attempts >= p.run.cfg.limit) this.end('Attempt limit reached.');
   },
   // A stone fusion is confirmed by exactly one stone leaving the bag with the inventory settled, not by a flag alone.
   stoneRefusal(code) {
@@ -291,40 +383,60 @@ const Alchemy = {
   observeAttribute(p, gp, failed = false) {
     if (gp.inventoryPending || Restock.count(p.stone.ref) !== p.stone.before - 1) return;
     const item = World.items().find(i => i.slot === p.run.slot);
-    if (!this.gear(item) || JSON.stringify([item.slot, item.refObjId, item.typeFlags]) !== p.run.shape) { this.stop('Item changed. Outstanding result requires manual review.'); return; }
+    if (!this.gear(item) || this.shape(item) !== p.run.shape) { this.stop('Item changed. Outstanding result requires manual review.'); return; }
     const label = ATTRIBUTE_LABEL[p.stone.attr], before = p.stone.values, after = this.attrValues(item);
     this.pending = null; p.run.attrFused++; if (failed) p.run.stoneFailures++;
     const shown = n => this.attrPercent(n) + '%', others = Object.keys(after).filter(k => k !== p.stone.attr && after[k] !== before[k]).map(k => `${ATTRIBUTE_LABEL[k]} ${shown(before[k])} → ${shown(after[k])}`);
     this.note(failed ? `${label} stone failed and was used up` : `${label}: ${shown(before[p.stone.attr])} → ${shown(after[p.stone.attr])}` + (others.length ? ` (also changed: ${others.join(', ')})` : ''));
-    p.run.fingerprint = this.fingerprint(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
-    p.run.nextAt = now() + 1000;
+    p.run.fingerprint = this.fingerprint(item); p.run.identity = this.identity(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
+    p.run.nextAt = now() + this.delay();
     if (this.run !== p.run) return;
     this.message = failed ? `The ${label} fusion failed and the stone was used up.` : `${label} is now ${shown(after[p.stone.attr])}.`;
   },
+  // A blue fusion: one stone leaves the bag. A success can also roll a white stat again, so only the item's shape is checked.
+  observeBlue(p, gp, failed = false) {
+    if (gp.inventoryPending || Restock.count(p.stone.ref) !== p.stone.before - 1) return;
+    const item = World.items().find(i => i.slot === p.run.slot);
+    if (!this.gear(item) || this.shape(item) !== p.run.shape) { this.stop('Item changed. Outstanding result requires manual review.'); return; }
+    const name = p.stone.blue, label = BLUE_LABEL[name], before = p.stone.value, after = this.attributeCount(item, name);
+    this.pending = null; p.run.blueFused++; if (failed) p.run.stoneFailures++;
+    const others = Object.keys(BLUE_LABEL).filter(n => n !== name && (p.stone.others[n] || 0) !== this.attributeCount(item, n))
+      .map(n => `${BLUE_LABEL[n]} ${p.stone.others[n] || 0} → ${this.attributeCount(item, n)}`);
+    this.note(failed ? `${label} stone failed and was used up` : `${label}: ${before} → ${after}` + (others.length ? ` (also changed: ${others.join(', ')})` : ''));
+    p.run.fingerprint = this.fingerprint(item); p.run.identity = this.identity(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
+    p.run.nextAt = now() + this.delay();
+    if (this.run !== p.run) return;
+    this.message = failed ? `The ${label} fusion failed and the stone was used up.` : `${label} is now ${after}.`;
+  },
   observeStone(p, gp, failed = false) {
     if (p.stone.kind === 'attr') return this.observeAttribute(p, gp, failed);
+    if (p.stone.kind === 'blue') return this.observeBlue(p, gp, failed);
     if (gp.inventoryPending || Restock.count(p.stone.ref) !== p.stone.before - 1) return;
     const item = World.items().find(i => i.slot === p.run.slot), label = STONES[p.stone.kind].label;
-    if (!this.gear(item) || this.identity(item) !== p.run.identity) { this.stop('Weapon identity changed. Outstanding result requires manual review.'); return; }
+    // A fusion that works can also roll a white stat again, so the item's shape is checked, not its stats.
+    if (!this.gear(item) || this.shape(item) !== p.run.shape) { this.stop('Weapon identity changed. Outstanding result requires manual review.'); return; }
     const count = this.attributeCount(item, STONES[p.stone.kind].option);
     this.pending = null; p.run.stonesUsed[p.stone.kind]++; if (failed) p.run.stoneFailures++;
     this.note(failed ? `${label} stone failed and was used up` : `${label} stone fused: ${count} of ${STONE_MAX}`);
-    p.run.fingerprint = this.fingerprint(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
-    p.run.nextAt = now() + 1000;
+    p.run.fingerprint = this.fingerprint(item); p.run.identity = this.identity(item); this.selected = { slot: item.slot, fingerprint: p.run.fingerprint };
+    p.run.nextAt = now() + this.delay();
     if (this.run !== p.run) return;
     this.message = failed ? `The ${label} fusion failed and the stone was used up (still ${count}).` : count > p.stone.count ? `${label} is now ${count} of ${STONE_MAX}.` : `A ${label} stone was used but the count did not rise (still ${count}).`;
   },
   tick() {
     this.observe();
+    // Between two queued steps, the next one starts here and sends its first request in the same tick.
+    if (!this.run && this.queue && !this.pending) this.queueTick();
     const r = this.run, gp = World.gp;
     if (this.pending && now() - this.pending.at > 15000) this.stop('Result unconfirmed after 15 seconds. No further attempts; wait for settlement or reload.');
     if (!r || this.run !== r) return;
     const blocked = this.blocked();
-    if (blocked || r.character !== World.charName || r.manualAt !== Manual.lastAt || r.config !== JSON.stringify(this.cfg())) return this.stop(blocked || 'Alchemy stopped: settings, character or manual control changed.');
+    if (blocked || r.character !== World.charName || r.manualAt !== Manual.lastAt || r.config !== this.goalsKey(r.goalsOf())) return this.stop(blocked || 'Alchemy stopped: settings, character or manual control changed.');
+    if (r.queued && (!this.queue || !this.cfg().queue.includes(this.queue.row))) return this.stop('Alchemy stopped: the queue changed.');
     if (this.pending) { this.message = 'Attempt ' + r.attempts + ': waiting for server result.'; return; }
     const item = World.items().find(i => i.slot === r.slot);
     if (!this.gear(item) || this.fingerprint(item) !== r.fingerprint) return this.stop('Weapon changed or moved. Select it again.');
-    if (r.kind !== 'attr' && !r.stonesOnly && (r.attempts >= r.cfg.limit || item.plus >= r.cfg.target)) return this.stop('Target or attempt limit reached.');
+    if (r.kind === 'plus' && !r.stonesOnly && (r.attempts >= r.cfg.limit || item.plus >= r.cfg.target)) return this.end('Target or attempt limit reached.');
     if (!gp.alchemy) return this.stop('Alchemy state unavailable.');
     if (gp.inventoryPending || gp.alchemy.pending || Loot.pressed()) { this.message = 'Alchemy waiting for inventory or potion use.'; return; }
     if (!gp.alchemy.visible) {
@@ -338,14 +450,14 @@ const Alchemy = {
     if (now() < r.nextAt || !Cmd.spaced('alchemy-start')) return;
     if (r.kind === 'attr') {
       const next = this.nextAttr(item, r.cfg);
-      if (!next) return this.stop('Every wanted percentage is reached.');
-      if (next.missing) return this.stop(next.missing);
+      if (!next) return this.end('Every wanted percentage is reached.');
+      if (next.missing) return this.end(next.missing, 'missing');
       for (const name of next.skipped.filter(name => !(r.skipped ||= []).includes(name))) {
         r.skipped.push(name);
         this.note(`No ${ATTRIBUTE_LABEL[name]} stone of degree ${this.degree(item)} in the bag; going on with ${ATTRIBUTE_LABEL[next.attr.name]}.`);
       }
       const cap = Math.max(1, Math.floor(Number(r.cfg.attr?.limit) || 100));
-      if (r.stoneAttempts >= cap) return this.stop(`Stopped after ${cap} attribute stones (your limit).`);
+      if (r.stoneAttempts >= cap) return this.end(`Stopped after ${cap} attribute stones (your limit).`);
       const slots = [item.slot, next.item.slot];
       if (slots.some(slot => !Number.isInteger(slot) || slot < 13 || slot > 255) || new Set(slots).size !== slots.length) return this.stop('Invalid material slots.');
       if (Cmd.raw({ kind: 'alchemy-start', mode: 'attribute', slots }, 'Alchemy: fuse a ' + ATTRIBUTE_LABEL[next.attr.name] + ' stone')) {
@@ -357,11 +469,30 @@ const Alchemy = {
       }
       return;
     }
+    if (r.kind === 'blue') {
+      const next = this.nextBlue(item, r.cfg, r.skipped);
+      if (!next) return this.end('Every wanted blue is reached.');
+      for (const name of next.full.filter(name => !r.skipped.includes(name))) { r.skipped.push(name); this.note(`No free magic slot for ${BLUE_LABEL[name]}; passing it over.`); }
+      if (next.missing) return this.end(next.missing, next.noSlot ? 'done' : 'missing');
+      const cap = Math.max(1, Math.floor(Number(r.cfg.blue?.limit) || 100));
+      if (r.stoneAttempts >= cap) return this.end(`Stopped after ${cap} blue stones (your limit).`);
+      const slots = [item.slot, next.item.slot];
+      if (slots.some(slot => !Number.isInteger(slot) || slot < 13 || slot > 255) || new Set(slots).size !== slots.length) return this.stop('Invalid material slots.');
+      if (Cmd.raw({ kind: 'alchemy-start', mode: 'magic', slots }, 'Alchemy: fuse a ' + BLUE_LABEL[next.name] + ' stone')) {
+        this.windowOwner = { character: r.character };
+        r.stoneAttempts++;
+        this.pending = { run: r, state: gp, before: gp.alchemy, at: now(), plus: item.plus,
+          stone: { kind: 'blue', blue: next.name, ref: next.item.refObjId, before: Restock.count(next.item.refObjId), value: this.attributeCount(item, next.name),
+            others: Object.fromEntries(Object.keys(BLUE_LABEL).map(n => [n, this.attributeCount(item, n)])) } };
+        this.message = `Fusing a ${BLUE_LABEL[next.name]} stone: waiting for the server result.`;
+      }
+      return;
+    }
     const need = this.nextStone(item, r.cfg, r.stonesOnly ? Infinity : item.plus);
-    if (need?.missing) return this.stop(`No ${STONES[need.missing].label} stone of degree ${this.degree(item)} in the bag` + (need.forAstral ? '; each Astral charge needs an Immortal charge first.' : '.'));
+    if (need?.missing) return this.end(`No ${STONES[need.missing].label} stone of degree ${this.degree(item)} in the bag` + (need.forAstral ? '; each Astral charge needs an Immortal charge first.' : '.'), 'missing');
     if (need) {
       const cap = Math.max(0, Math.floor(Number(r.cfg.stoneLimit) || 0));
-      if (cap && r.stoneAttempts >= cap) return this.stop(`Stopped after ${cap} stone fusions (your limit).`);
+      if (cap && r.stoneAttempts >= cap) return this.end(`Stopped after ${cap} stone fusions (your limit).`);
       const slots = [item.slot, need.item.slot];
       if (slots.some(slot => !Number.isInteger(slot) || slot < 13 || slot > 255) || new Set(slots).size !== slots.length) return this.stop('Invalid material slots.');
       if (Cmd.raw({ kind: 'alchemy-start', mode: 'magic', slots }, 'Alchemy: fuse a ' + STONES[need.kind].label + ' stone')) {
@@ -373,9 +504,9 @@ const Alchemy = {
       }
       return;
     }
-    if (r.stonesOnly) return this.stop('The weapon has the wanted stone counts.');
+    if (r.stonesOnly) return this.end('The weapon has the wanted stone counts.');
     const { elixir, powder, wantPowder } = this.materials(item, r.cfg);
-    if (!elixir || wantPowder && !powder) return this.stop('Selected elixirs or compatible lucky powder ran out.');
+    if (!elixir || wantPowder && !powder) return this.end('Selected elixirs or compatible lucky powder ran out.', 'missing');
     const slots = [item.slot, elixir.slot, ...(powder ? [powder.slot] : [])];
     if (slots.some(slot => !Number.isInteger(slot) || slot < 13 || slot > 255) || new Set(slots).size !== slots.length) return this.stop('Invalid material slots.');
     if (Cmd.raw({ kind: 'alchemy-start', mode: 'reinforce', slots }, 'Alchemy: enhance selected weapon')) {
@@ -387,39 +518,186 @@ const Alchemy = {
       this.message = 'Attempt ' + r.attempts + ': waiting for server result.';
     }
   },
+  // Gear alchemy may still work on, which town trips and item rules leave in the bag: the selected item and every queued one.
+  protects(item) {
+    if (!item) return false;
+    if (this.selected && this.selected.slot === item.slot) return true;
+    return this.rows().some(row => row.slot === item.slot && row.refObjId === item.refObjId);
+  },
+  // Anything alchemy owns right now: a step, an unconfirmed result, or a queue between two steps.
+  active() { return !!(this.run || this.pending || this.queue); },
+  //============================================================================
+  // The queue: items done one after another. Each row is { refObjId, slot, goals } in Settings (goals as alchemyGoals());
+  // the bot does Plus, then White, then Blue on it, then the next row. A step reuses the single-item code with the row's goals.
+  rows() { return this.cfg().queue; },
+  rowItem(row) { const i = row && World.items().find(i => i.slot === row.slot); return i && i.refObjId === row.refObjId && this.gear(i) ? i : null; },
+  rowName(row) { return this.rowItem(row)?.name || Items.name(row.refObjId); },
+  addRow(slot) {
+    const item = World.items().find(i => i.slot === Number(slot)), rows = this.rows();
+    if (!this.gear(item)) return UI.toast('Pick an item from your bag first.', 'warn');
+    if (rows.some(r => r.slot === item.slot && r.refObjId === item.refObjId)) return UI.toast('That item is already in the queue.', 'warn');
+    if (rows.length >= 40) return UI.toast('The queue holds at most 40 items.', 'warn');
+    // A new row starts from the goals last used (the single-item settings), then is edited on its own.
+    rows.push({ refObjId: item.refObjId, slot: item.slot, goals: alchemyGoals(this.cfg()) });
+    this.rowStatus.set(rows.at(-1), 'Waiting'); this.editRow = rows.length - 1; Settings.saveProfile();
+  },
+  removeRow(index) {
+    if (this.queue) return UI.toast('Stop the queue before removing items.', 'warn');
+    if (!this.rows()[index]) return;
+    this.rows().splice(index, 1); this.editRow = Math.max(0, Math.min(index, this.rows().length - 1)); Settings.saveProfile();
+  },
+  moveRow(index, by) {
+    if (this.queue) return UI.toast('Stop the queue before reordering it.', 'warn');
+    const rows = this.rows(), to = index + by;
+    if (!rows[index] || !rows[to]) return;
+    [rows[index], rows[to]] = [rows[to], rows[index]]; this.editRow = to; Settings.saveProfile();
+  },
+  // Does a step still have something to do on the item? (The step's own checks decide the details when it starts.)
+  stepWanted(step, item, goals) {
+    if (step === 'plus') return Number.isInteger(goals.target) && goals.target >= 1 && item.plus < goals.target;
+    if (step === 'white') return this.attributes(this.kind(item)).some(a => { const t = this.attrTarget(a.name, goals); return t && this.attrValue(item, a.index) < t; });
+    const degree = this.degree(item);
+    return this.blues(item).some(name => { const t = this.blueTarget(name, goals, degree); return t && this.attributeCount(item, name) < t; });
+  },
+  emptyTotals() {
+    return { attempts: 0, successes: 0, failures: 0, destroyed: 0, highest: 0, elixirs: 0, powders: 0, stoneAttempts: 0, stoneFailures: 0, attrFused: 0, blueFused: 0,
+      stonesUsed: { luck: 0, steady: 0, immortal: 0, astral: 0 } };
+  },
+  addTotals(total, r) {
+    for (const k of Object.keys(total)) {
+      if (k === 'stonesUsed') for (const s of Object.keys(total.stonesUsed)) total.stonesUsed[s] += r.stonesUsed?.[s] || 0;
+      else if (k === 'highest') total.highest = Math.max(total.highest, r.highest || 0);
+      else total[k] += r[k] || 0;
+    }
+  },
+  // Results shown under the queue: the finished steps plus the one running now.
+  stats() {
+    const q = this.queue, r = this.result;
+    if (!q || r !== q.totals || !this.run?.queued) return r;
+    const total = JSON.parse(JSON.stringify(r)); this.addTotals(total, this.run); return total;
+  },
+  startQueue() {
+    if (this.run || this.queue) return;
+    if (this.pending) return UI.toast('Previous attempt is unconfirmed. Wait for its result; reload if the game cannot settle it.', 'warn');
+    const reject = text => { this.message = text; UI.toast(text, 'warn'); }, rows = this.rows();
+    const blocked = this.blocked(); if (blocked) return reject(blocked);
+    if (!rows.length) return reject('Add an item from your bag to the queue first.');
+    this.queue = { row: rows[0], step: 'plus', character: World.charName, manualAt: Manual.lastAt, done: 0, skipped: 0, totals: this.emptyTotals(), nextAt: 0, waitSince: 0 };
+    for (const row of rows) this.rowStatus.set(row, 'Waiting');
+    this.result = this.queue.totals; this.message = 'Queue started.';
+    this.note(`Queue started: ${rows.length} item${rows.length > 1 ? 's' : ''}.`);
+  },
+  // Between steps: pick the next step with something to do on the current row and start it.
+  queueTick() {
+    const q = this.queue, blocked = this.blocked();
+    if (blocked || q.character !== World.charName || q.manualAt !== Manual.lastAt) return this.stop(blocked || 'Alchemy stopped: character or manual control changed.');
+    if (!this.rows().includes(q.row)) return this.stop('Alchemy stopped: the queue changed.');
+    if (now() < q.nextAt) return;
+    const item = this.rowItem(q.row);
+    if (!item) return this.queueMissing(`not in bag slot ${q.row.slot} any more`);
+    for (let i = QUEUE_STEPS.indexOf(q.step); i < QUEUE_STEPS.length; i++) {
+      const step = QUEUE_STEPS[i]; q.step = step;
+      if (!this.stepWanted(step, item, q.row.goals)) continue;
+      const row = q.row, result = this.begin(step === 'white' ? 'attr' : step, item, row.goals, { goalsOf: () => row.goals, queued: true });
+      if (!result) { q.waitSince = 0; this.rowStatus.set(row, 'Running: ' + STEP_LABEL[step]); return; }
+      if (result.wait) {
+        // Stats still loading: wait a little, then pass the item over rather than stall the queue.
+        q.waitSince ||= now(); this.message = result.error;
+        if (now() - q.waitSince > 15000) { q.waitSince = 0; return this.queueMissing(result.error.replace(/ Try again in a moment\.$/, '')); }
+        return;
+      }
+      if (result.missing) return this.queueMissing(result.error);
+      // Nothing to do in this step after all (the goal is met or not settable): go on.
+    }
+    this.rowDone();
+  },
+  // Called by end() when a queued step stops normally.
+  queueStepEnded(reason, how) {
+    const q = this.queue;
+    if (how === 'missing') return this.queueMissing(reason);
+    const next = QUEUE_STEPS.indexOf(q.step) + 1;
+    this.rowStatus.set(q.row, STEP_LABEL[q.step] + ' done'); q.nextAt = now() + this.delay();
+    if (next < QUEUE_STEPS.length) q.step = QUEUE_STEPS[next]; else this.rowDone();
+  },
+  queueMissing(reason) {
+    const q = this.queue, name = this.rowName(q.row), text = reason.charAt(0).toUpperCase() + reason.slice(1);
+    if (this.cfg().onMissing === 'stop') return this.stop(`${name}: ${text}`);
+    this.rowStatus.set(q.row, 'Skipped: ' + text); q.skipped++;
+    this.note(`${name} skipped: ${text}`); this.nextRow();
+  },
+  rowDone() {
+    const q = this.queue;
+    this.rowStatus.set(q.row, 'Done'); q.done++;
+    this.note(`${this.rowName(q.row)} is done.`); this.nextRow();
+  },
+  nextRow() {
+    const q = this.queue, rows = this.rows(), next = rows[rows.indexOf(q.row) + 1];
+    if (next) { q.row = next; q.step = 'plus'; q.nextAt = now() + this.delay(); return; }
+    q.row = null;
+    const text = `Queue finished: ${q.done} done` + (q.skipped ? `, ${q.skipped} skipped.` : '.');
+    if (this.cfg().queueSound) Sound.play('alchemy');
+    this.stop(text);
+  },
+  // The goals being edited: the selected queue row's, or the defaults new rows start from when the queue is empty.
+  editing() { const row = this.rows()[this.editRow]; return row ? { row, goals: row.goals, item: this.rowItem(row) } : { row: null, goals: this.cfg(), item: null }; },
   draw() {
-    const c = () => this.cfg(), items = () => [[-1, 'Select an item from your bag'], ...World.items().filter(i => this.gear(i)).map(i => [i.slot, (i.name || Items.name(i.refObjId)) + ' +' + i.plus + ' · ' + this.kind(i) + ' · bag slot ' + i.slot])];
-    const elixirs = () => {
-      const kind = this.kind(this.item()) || 'weapon';
-      return [[0, 'Any compatible ' + kind + ' elixir'], ...[...new Map(World.items().filter(i => this.elixir(i, kind)).map(i => [i.refObjId, i.name || Items.name(i.refObjId)])).entries()]];
-    };
-    const group = UI.group('Item enhancement');
-    group.append(UI.select('Item', items, () => this.selected?.slot ?? -1, slot => { this.select(slot); UI.draw(); }),
-      UI.number('Target +', () => c().target, n => c().target = n, 1, 250),
-      UI.number('Maximum attempts', () => c().limit, n => c().limit = n, 1, ALCHEMY_MAX_ATTEMPTS),
-      UI.select('Elixir', elixirs, () => c().elixir, value => c().elixir = Number(value)),
-      UI.check('Use lucky powder of matching degree', () => c().powder, value => c().powder = value),
-      UI.number('Lucky powder from +', () => c().from.powder, n => c().from.powder = n, 0, 250),
-      UI.row(UI.button('Start alchemy', () => this.start()), UI.button('Stop alchemy', () => this.stop())),
-      el('p', 'Works on weapons, shields, armour and accessories in your bag; stop hunting and travel first. Each attempt spends one elixir of the item\'s kind and, when enabled and from the plus you set, one lucky powder of its degree. A failure resets the + to 0 (to +4 with an Astral stone); from +5 a failure can also destroy the item half the time unless it has an Immortal charge, or damage it unless it has a Steady charge. Stop prevents the next attempt; a sent attempt may still finish. Unknown results pause without retrying.', 'muted'));
-    UI.alchemyPreview = el('div', '', 'row'); UI.alchemyNote = el('p', '', 'muted'); group.append(UI.alchemyPreview, UI.alchemyNote); UI.pane.append(group);
-    const stones = UI.group('Stones that help and protect');
-    for (const [kind, s] of Object.entries(STONES)) stones.append(UI.check('Use ' + s.label + ' stones while enhancing', () => c().use[kind], v => c().use[kind] = v),
-      UI.number(s.label + ': keep this many charges on the item', () => c().stones[kind], n => c().stones[kind] = n, 1, STONE_MAX),
-      UI.number(s.label + ': from +', () => c().from[kind], n => c().from[kind] = n, 0, 250));
-    stones.append(UI.number('Stop after this many fusions (0 = no limit)', () => c().stoneLimit, n => c().stoneLimit = n, 0, 1000));
-    stones.append(UI.row(UI.button('Fuse stones now', () => this.start(true)), UI.button('Stop', () => this.stop())),
-      el('p', 'Each stone adds a charge to the item, up to 6. Tick Use for the stones you want. Before every attempt at or above the plus you set, if the item has fewer charges than you asked to keep, one is fused automatically from a stone of the item\'s degree in your bag. Luck adds 5% to the chance, Steady stops the durability damage and Immortal stops the destruction when an enhancement fails from +5, and Astral keeps +4 instead of resetting to 0. Each Astral charge needs an Immortal charge, so an Immortal stone is fused first when the weapon needs one, even with Immortal not ticked. A fusion can fail and use up the stone. Stops if a stone is missing, the game refuses, or when it reaches the fusion limit above (off by default). Fuse stones now ignores the plus and only fills the charges.', 'muted'));
-    UI.pane.append(stones);
-    const attrs = UI.group('Item attributes (stat percentages)');
-    UI.attrRows = el('div'); UI.attrNote = el('p', '', 'muted'); attrs.append(UI.attrRows, UI.attrNote);
-    attrs.append(UI.number('Stop after this many attribute stones', () => c().attr.limit, n => c().attr.limit = n, 1, 1000),
-      UI.row(UI.button('Fuse attribute stones', () => this.startAttributes()), UI.button('Stop', () => this.stop())),
-      el('p', 'Pick the lowest percentage you want for each stat of the item selected above, then start. The bot fuses attribute stones of the item\'s degree until every picked stat reaches its target, working down the list. A stat whose stones run out, or that has none in the bag, is passed over and the next one is done; it stops when no picked stat below its target has stones left. Every successful fusion rolls the stat again, so it can also come out lower, and it can re-roll another stat of the item. The chance is 50% per stone before bonuses, and the higher steps get rare fast: 80% and 100% can take hundreds of stones. The item\'s own limit may stop it ever reaching the higher steps, so set a stone limit.', 'muted'));
-    UI.pane.append(attrs);
+    const c = () => this.cfg(), g = () => this.editing().goals;
+    // Queue
+    const queued = i => this.rows().some(r => r.slot === i.slot && r.refObjId === i.refObjId);
+    const bag = () => [[-1, 'Add from bag…'], ...World.items().filter(i => this.gear(i) && !queued(i)).map(i => [i.slot, `${i.name || Items.name(i.refObjId)} +${i.plus} · ${this.kind(i)}${this.degree(i) ? ' · degree ' + this.degree(i) : ''} · slot ${i.slot}`])];
+    let pick = -1;
+    const queue = UI.group('Alchemy queue');
+    UI.queueTable = el('div', '', 'alchemy-queue');
+    queue.append(UI.row(UI.select('Item', bag, () => pick, v => { pick = Number(v); }), UI.button('Add', () => { this.addRow(pick); pick = -1; UI.draw(); })),
+      UI.queueTable,
+      UI.row(UI.button('Up', () => { this.moveRow(this.editRow, -1); UI.draw(); }), UI.button('Down', () => { this.moveRow(this.editRow, 1); UI.draw(); }),
+        UI.button('Remove', () => { this.removeRow(this.editRow); UI.draw(); })),
+      UI.row(UI.button('Start queue', () => this.startQueue()), UI.button('Stop', () => this.stop())),
+      UI.check('Out of materials: go to the next item', () => c().onMissing !== 'stop', v => c().onMissing = v ? 'next' : 'stop'),
+      UI.number('Delay between attempts (ms)', () => c().delay, n => c().delay = n, 500, 10000, 100),
+      UI.check('Play a sound when the queue is done', () => c().queueSound, v => c().queueSound = v),
+      el('p', 'Each item gets Plus, then White, then Blue, then the next item starts. Blues come last because a white stone that works can roll a blue again. A step with no goal is passed over. Stop hunting and travel first; Stop prevents the next attempt, a sent one may still finish.', 'muted'));
+    UI.alchemyNote = el('p', '', 'muted'); queue.append(UI.alchemyNote);
+    UI.pane.append(queue);
+    // Goals of the selected row
+    const goals = UI.group('Goals'), tabs = el('div', null, 'subtabs');
+    UI.goalsTitle = el('p', '', 'muted');
+    for (const [key, name] of [['plus', 'Plus'], ['white', 'Attribute'], ['blue', 'Blue']]) {
+      const tab = UI.button(name, () => { this.goalsTab = key; UI.draw(); });
+      tab.setAttribute('aria-selected', String(this.goalsTab === key)); tabs.append(tab);
+    }
+    goals.append(UI.goalsTitle, tabs);
+    if (this.goalsTab === 'plus') {
+      const elixirs = () => {
+        const kind = this.kind(this.editing().item) || 'weapon';
+        return [[0, 'Any compatible ' + kind + ' elixir'], ...[...new Map(World.items().filter(i => this.elixir(i, kind)).map(i => [i.refObjId, i.name || Items.name(i.refObjId)])).entries()]];
+      };
+      goals.append(UI.number('Target + (0 = leave the plus)', () => g().target, n => g().target = n, 0, 250),
+        UI.number('Maximum attempts', () => g().limit, n => g().limit = n, 1, ALCHEMY_MAX_ATTEMPTS),
+        UI.select('Elixir', elixirs, () => g().elixir, value => g().elixir = Number(value)),
+        UI.check('Use lucky powder of matching degree', () => g().powder, value => g().powder = value),
+        UI.number('Lucky powder from +', () => g().from.powder, n => g().from.powder = n, 0, 250));
+      for (const [kind, st] of Object.entries(STONES)) goals.append(UI.check('Use ' + st.label + ' stones while enhancing', () => g().use[kind], v => g().use[kind] = v),
+        UI.number(st.label + ': keep this many charges on the item', () => g().stones[kind], n => g().stones[kind] = n, 1, STONE_MAX),
+        UI.number(st.label + ': from +', () => g().from[kind], n => g().from[kind] = n, 0, 250));
+      goals.append(UI.number('Stop after this many stone fusions (0 = no limit)', () => g().stoneLimit, n => g().stoneLimit = n, 0, 1000),
+        el('p', 'Each attempt spends one elixir of the item\'s kind and, from the plus you set, one lucky powder of its degree. A failure resets the + to 0 (to +4 with an Astral charge); from +5 it can also destroy the item unless it has an Immortal charge, or damage it unless it has a Steady charge. Before an attempt at or above a stone\'s plus, a charge is fused when the item has fewer than you asked to keep. Luck adds 5% to the chance; each Astral charge needs an Immortal charge first. A stone fusion can fail and use up the stone.', 'muted'));
+      UI.alchemyPlus = el('p', '', 'muted'); goals.append(UI.alchemyPlus);
+    } else if (this.goalsTab === 'white') {
+      UI.attrRows = el('div'); UI.attrNote = el('p', '', 'muted');
+      goals.append(UI.attrRows, UI.attrNote, UI.number('Stop after this many attribute stones', () => g().attr.limit, n => g().attr.limit = n, 1, 1000),
+        el('p', 'The lowest percentage you want for each stat. Stones of the item\'s degree are fused until every picked stat reaches it; a stat with no stones is passed over. A stone that works rolls the stat again (it can come out lower) and can roll another stat or a blue too. The chance is 50% per stone before bonuses; 80% and 100% can take hundreds of stones, so keep a limit.', 'muted'));
+    } else {
+      UI.blueSlots = el('p', '', 'muted'); UI.blueRows = el('div');
+      goals.append(UI.blueSlots, UI.blueRows, UI.number('Stop after this many blue stones', () => g().blue.limit, n => g().blue.limit = n, 1, 1000),
+        el('p', 'The lowest value you want for each blue. A blue already on the item is rolled again on success (it can come out lower), so "or more" goals can take many stones. A new blue needs a free magic slot, and Luck, Steady, Immortal and Astral charges use the same slots; a blue that does not fit is passed over.', 'muted'));
+    }
+    UI.pane.append(goals);
+    // Bag, results, sound
+    const stock = UI.group('In bag'); UI.alchemyBag = el('p', '', 'muted'); stock.append(UI.alchemyBag); UI.pane.append(stock);
     const results = UI.group('Results');
     UI.alchemyStats = el('p', '', 'muted'); UI.alchemyLog = el('p', '', 'muted');
-    results.append(UI.alchemyStats, UI.alchemyLog, UI.button('Clear results', () => { this.result = null; this.log.length = 0; this.refresh(); }));
+    results.append(UI.alchemyStats, UI.alchemyLog, UI.button('Clear results', () => { if (!this.queue) this.result = null; this.log.length = 0; this.refresh(); }));
     UI.pane.append(results);
     const sound = UI.group('Sound');
     sound.append(UI.check('Play a sound when the target + is reached', () => c().sound, value => c().sound = value),
@@ -427,56 +705,98 @@ const Alchemy = {
       UI.soundPicker('alchemy', 'Alchemy', () => { c().sound = true; Settings.saveProfile(); }),
       el('p', 'Off by default. The sound plays once, when a confirmed success reaches the target + you set; earlier successes and failures stay silent. A custom sound (MP3, WAV, OGG or M4A, up to 1 MB) replaces the chime. A click in the game unlocks the sound when the browser blocked it.', 'muted'));
     UI.pane.append(sound);
-    this.drawAttributes();
+    this.drawQueue(); this.drawAttributes(); this.drawBlues();
     this.refresh();
   },
+  // One line per queued item: its name and plus, the plus goal, the three steps and where it stands. Click to edit its goals.
+  drawQueue() {
+    if (!UI.queueTable) return;
+    UI.queueTable.replaceChildren();
+    const rows = this.rows(), q = this.queue;
+    if (!rows.length) { UI.queueTable.append(el('p', 'The queue is empty. Pick an item above and press Add.', 'muted')); return; }
+    rows.forEach((row, index) => {
+      const item = this.rowItem(row), line = el('button', '', 'queue-row');
+      line.type = 'button'; line.setAttribute('aria-pressed', String(index === this.editRow));
+      const icon = el('span', '', 'skill-icon'); Icons.paint(icon, item?.icon || Items.iconDdj(row.refObjId));
+      const steps = el('span', '', 'queue-steps');
+      for (const step of QUEUE_STEPS) {
+        const want = item && this.stepWanted(step, item, row.goals), running = q?.row === row && q.step === step && this.run?.queued;
+        steps.append(el('i', STEP_LABEL[step], running ? 'now' : item && !want ? 'ok' : ''));
+      }
+      const plus = item ? `+${item.plus}` + (row.goals.target ? ` → +${row.goals.target}` : '') : '';
+      line.append(el('span', String(index + 1), 'queue-n'), icon, el('span', `${this.rowName(row)} ${plus}`, 'queue-name'), steps,
+        el('span', item ? this.rowStatus.get(row) || 'Waiting' : 'Not in its bag slot', 'queue-status'));
+      line.addEventListener('click', () => { this.editRow = index; UI.draw(); });
+      UI.queueTable.append(line);
+    });
+  },
   drawAttributes() {
-    const item = this.item(), c = this.cfg();
-    if (!UI.attrRows) return;
+    const { item, goals: c } = this.editing();
+    if (!UI.attrRows || this.goalsTab !== 'white') return;
     UI.attrRows.replaceChildren();
-    if (!this.gear(item)) { UI.attrRows.append(el('p', 'Select an item above to choose its percentages.', 'muted')); return; }
+    if (!this.gear(item)) { UI.attrRows.append(el('p', 'Add an item to the queue and select it to choose its percentages.', 'muted')); return; }
     for (const a of this.attributes(this.kind(item))) {
       const options = [[0, 'Leave alone'], ...ATTRIBUTE_STEPS.map(([value, percent]) => [value, `${percent}% or better`])];
       UI.attrRows.append(UI.select(`${ATTRIBUTE_LABEL[a.name]} (now ${this.attrPercent(this.attrValue(item, a.index))}%)`, options, () => this.attrTarget(a.name, c), v => { c.attr.targets[a.name] = Number(v); this.refresh(); }));
     }
   },
+  // One goal per blue the item can take: leave alone, any value, or at least one of the values its degree can roll.
+  drawBlues() {
+    const { item, goals: c } = this.editing();
+    if (!UI.blueRows || this.goalsTab !== 'blue') return;
+    UI.blueRows.replaceChildren();
+    if (!this.gear(item)) { UI.blueRows.append(el('p', 'Add an item to the queue and select it to choose its blues.', 'muted')); return; }
+    const degree = this.degree(item);
+    for (const name of this.blues(item)) {
+      const values = this.blueValues(name, degree), stone = ALCHEMY_DATA.magicStones?.[name] + degree - 1;
+      const inBag = World.items().filter(i => i.refObjId === stone && i.quantity > 0 && i.slot >= 13).reduce((n, i) => n + i.quantity, 0);
+      const options = [[0, 'Leave alone'], ...values.map((v, k) => [v, k === 0 ? 'Add it (any value)' : k === values.length - 1 ? `Max (${v})` : `${v} or more`])];
+      UI.blueRows.append(UI.select(`${BLUE_LABEL[name]} (now ${this.attributeCount(item, name) || '–'}, ${inBag} in bag)`, options, () => this.blueTarget(name, c, degree), v => { c.blue.targets[name] = Number(v); this.refresh(); }));
+    }
+  },
   refresh() {
     if (!UI.is('Alchemy') || !UI.alchemyNote) return;
-    const item = this.item(), r = this.result, c = this.cfg();
+    const { row, item, goals: c } = this.editing(), r = this.stats(), q = this.queue;
     const fmt = n => !Number.isFinite(n) ? 'a huge number of' : n < 100 ? n.toFixed(n < 10 ? 1 : 0) : n < 1e6 ? Math.round(n).toLocaleString('en-US') : n.toExponential(1);
-    const attributes = item && this.gear(item) ? '\nStones on the item: ' + Object.entries(STONES).map(([kind, s]) => {
-      const have = this.attributesKnown(item) ? this.attributeCount(item, s.option) : '?', bag = World.items().filter(i => i.refObjId === s.base + this.degree(item) - 1 && i.quantity > 0).reduce((n, i) => n + i.quantity, 0);
-      return `${s.label} ${have}/${STONE_MAX} (${bag} in bag)`;
-    }).join(' · ') : '';
-    const odds = item && this.gear(item) ? this.odds(item, c) : null;
-    const chance = odds ? `\nNext attempt at +${item.plus}: ${odds.now}% to succeed.` + (odds.plan ? ` To reach +${odds.target} expect about ${fmt(odds.plan.attempts)} elixirs; the chance of getting there without a single failure is ${(odds.plan.clean * 100).toFixed(odds.plan.clean < .1 ? 2 : 0)}%.` : '') : '';
-    const kind = this.kind(item) || 'weapon';
-    const used = this.wanted(c).map(k => `${STONES[k].label} from +${this.from(k, c)} (keep ${this.keep(k, c)})`);
-    const helpers = '\nStones while enhancing: ' + (used.length ? used.join(' · ') : 'none ticked, so none are fused. Tick Use Luck, Steady, Immortal or Astral below.');
-    UI.alchemyNote.textContent = this.message + attributes + chance + helpers +
-      `\nElixirs available: ${World.items().filter(i => this.elixir(i, kind) && (!c.elixir || i.refObjId === c.elixir)).reduce((n, i) => n + i.quantity, 0)}` +
-      (c.powder ? ` · Matching powder: ${World.items().filter(i => this.powderDegree(i) === this.degree(item) && this.degree(item) > 0).reduce((n, i) => n + i.quantity, 0)}` : '');
+    UI.alchemyNote.textContent = this.message + (q?.row ? `\nQueue: item ${this.rows().indexOf(q.row) + 1} of ${this.rows().length} · ${STEP_LABEL[q.step]} · ${q.done} done` + (q.skipped ? ` · ${q.skipped} skipped` : '') : '');
+    // The queue lines show live plus values and statuses, so they are rebuilt when any of that changes.
+    const queueKey = JSON.stringify([this.editRow, q?.step, this.rows().indexOf(q?.row), !!this.run, ...this.rows().map(x => { const i = this.rowItem(x); return [x.slot, x.refObjId, i?.plus, i?.variance, i?.magic, x.goals.target, this.rowStatus.get(x)]; })]);
+    if (UI.queueTable && UI.queueTable.dataset.key !== queueKey) { UI.queueTable.dataset.key = queueKey; this.drawQueue(); }
+    if (UI.goalsTitle) UI.goalsTitle.textContent = row ? `Goals for ${this.rowName(row)}` + (item ? ` · ${this.kind(item)}${this.degree(item) ? ' · degree ' + this.degree(item) : ''}` : ' · not in its bag slot') : 'The queue is empty: these are the goals new items start with.';
+    if (UI.alchemyPlus?.isConnected) {
+      const stones = item ? 'Stones on the item: ' + Object.values(STONES).map(st => `${st.label} ${this.attributesKnown(item) ? this.attributeCount(item, st.option) : '?'}/${STONE_MAX}`).join(' · ') : '';
+      const odds = item ? this.odds(item, c) : null;
+      UI.alchemyPlus.textContent = stones + (odds ? `\nNext attempt at +${item.plus}: ${odds.now}% to succeed.` + (odds.plan ? ` To reach +${odds.target} expect about ${fmt(odds.plan.attempts)} elixirs; the chance of getting there without a single failure is ${(odds.plan.clean * 100).toFixed(odds.plan.clean < .1 ? 2 : 0)}%.` : '') : '');
+    }
+    // The goal rows show the item's current values, so they are rebuilt when its stats change.
+    const statKey = item ? JSON.stringify([this.editRow, item.slot, item.refObjId, item.variance, item.magic]) : String(this.editRow);
+    if (UI.attrRows?.isConnected && UI.attrRows.dataset.key !== statKey) { UI.attrRows.dataset.key = statKey; this.drawAttributes(); }
+    if (UI.blueRows?.isConnected && UI.blueRows.dataset.key !== statKey) { UI.blueRows.dataset.key = statKey; this.drawBlues(); }
+    if (UI.attrNote?.isConnected) {
+      const wanted = item ? this.attributes(this.kind(item)).filter(a => this.attrTarget(a.name, c)) : [];
+      UI.attrNote.textContent = wanted.length ? 'Aiming for: ' + wanted.map(a => `${ATTRIBUTE_LABEL[a.name]} ${this.attrPercent(this.attrTarget(a.name, c))}%+ (about ${Math.round(this.attrExpected(this.attrTarget(a.name, c)))} stones)`).join(' · ') : '';
+    }
+    if (UI.blueSlots?.isConnected) {
+      const slots = item ? this.magicSlots(item) : null, protect = item ? Object.values(STONES).filter(st => this.attributeCount(item, st.option) > 0).length : 0;
+      UI.blueSlots.textContent = !item ? '' : slots.limit === null ? `Magic slots used: ${slots.used}.` : `Magic slots: ${slots.used} of ${slots.limit} used (${protect} by Luck/Steady/Immortal/Astral), ${Math.max(0, slots.limit - slots.used)} free.`;
+    }
+    if (UI.alchemyBag) {
+      const degree = this.degree(item), kind = this.kind(item) || 'weapon', count = test => World.items().filter(i => i.quantity > 0 && i.slot >= 13 && test(i)).reduce((n, i) => n + i.quantity, 0);
+      const parts = [`${kind} elixirs ${count(i => this.elixir(i, kind))}`];
+      if (degree) {
+        parts.push(`lucky powder ${count(i => this.powderDegree(i) === degree)}`,
+          ...Object.values(STONES).map(st => `${st.label} ${count(i => i.refObjId === st.base + degree - 1)}`),
+          `white stones ${count(i => (i.typeFlags & 0xfffe) === 0x15ec && Object.values(ALCHEMY_DATA.attrStones).includes(i.refObjId - degree + 1))}`,
+          `blue stones ${count(i => (i.typeFlags & 0xfffe) === 0x0dec && Object.values(ALCHEMY_DATA.magicStones || {}).includes(i.refObjId - degree + 1))}`);
+      }
+      UI.alchemyBag.textContent = (degree ? `For degree ${degree}: ` : '') + parts.join(' · ');
+    }
     if (UI.alchemyStats) {
       UI.alchemyStats.textContent = r
         ? `Attempts ${r.attempts} · Success ${r.successes} · Failed ${r.failures} · Destroyed ${r.destroyed || 0} · Highest + ${r.highest ?? 0}` + (r.attempts ? ` · Success rate ${Math.round(r.successes / r.attempts * 100)}%` : '') +
-          `\nUsed: elixirs ${r.elixirs} · powder ${r.powders} · attribute stones ${r.attrFused || 0} · stones ${Object.entries(STONES).map(([k, s]) => `${s.label} ${r.stonesUsed?.[k] || 0}`).join(' / ')}`
+          `\nUsed: elixirs ${r.elixirs} · powder ${r.powders} · white stones ${r.attrFused || 0} · blue stones ${r.blueFused || 0} · stones ${Object.entries(STONES).map(([k, st]) => `${st.label} ${r.stonesUsed?.[k] || 0}`).join(' / ')}`
         : 'No results yet.';
       UI.alchemyLog.textContent = this.log.slice(-12).map(l => new Date(l.at).toLocaleTimeString('en-GB') + '  ' + l.text).join('\n');
-    }
-    // The attribute rows show the item's current percentages, so they are rebuilt when its stats change.
-    const attrKey = item ? JSON.stringify([item.slot, item.refObjId, item.variance]) : '';
-    if (UI.attrRows && UI.attrRows.dataset.key !== attrKey) { UI.attrRows.dataset.key = attrKey; this.drawAttributes(); }
-    if (UI.attrNote) {
-      const wanted = item && this.gear(item) ? this.attributes(this.kind(item)).filter(a => this.attrTarget(a.name, c)) : [];
-      UI.attrNote.textContent = wanted.length ? 'Aiming for: ' + wanted.map(a => `${ATTRIBUTE_LABEL[a.name]} ${this.attrPercent(this.attrTarget(a.name, c))}%+ (about ${Math.round(this.attrExpected(this.attrTarget(a.name, c)))} stones)`).join(' · ') : '';
-    }
-    const key = item ? item.refObjId + ':' + item.plus + ':' + item.slot : '';
-    if (UI.alchemyPreview.dataset.item !== key) {
-      UI.alchemyPreview.dataset.item = key; UI.alchemyPreview.replaceChildren();
-      if (this.gear(item)) {
-        const icon = el('span', '', 'skill-icon'); Icons.paint(icon, item.icon || Items.iconDdj(item.refObjId));
-        UI.alchemyPreview.append(icon, el('span', (item.name || Items.name(item.refObjId)) + ' +' + item.plus + (this.degree(item) ? ' · Degree ' + this.degree(item) : '')));
-      }
     }
   },
 };

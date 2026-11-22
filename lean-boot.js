@@ -1,7 +1,7 @@
 // The player's Start / stop (F8 and the buttons). What they choose is remembered for auto-start.
 // True while anything that Start / stop would stop is running.
 function botActive() {
-  return !!(Alchemy.run || Alchemy.pending || Stall.run || SellStar.run || Hunt.running || Town.trip || Quest.trip || WalkBack.active || Travel.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive);
+  return !!(Alchemy.active() || Stall.run || SellStar.run || Hunt.running || Town.trip || Quest.trip || WalkBack.active || Travel.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive);
 }
 function toggleBot() {
   if (botActive()) userStop();

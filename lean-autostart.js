@@ -38,7 +38,7 @@ const AutoStart = {
     const entry = this.entry;
     if (!entry) return;
     if (Reconnect.active()) return this.cancel('Auto-start skipped: reconnect is bringing the bot back.');
-    if (Hunt.running || Town.trip || WalkBack.active || Travel.active || Trade.run || Alchemy.run || Alchemy.pending || Restock.recording) return this.cancel();
+    if (Hunt.running || Town.trip || WalkBack.active || Travel.active || Trade.run || Alchemy.active() || Restock.recording) return this.cancel();
     if (now() - entry.at > AUTO_START_GIVE_UP_MS) return this.cancel('Auto-start gave up: the game did not settle within 2 minutes.');
     if (World.charName && Settings.profileKey !== 'profile:' + World.charName) { this.message = 'Auto-start: waiting for the character settings.'; return; }
     if (!this.on()) { this.entry = null; return; }
@@ -114,7 +114,7 @@ const Retry = {
     if (!s) return;
     if (!this.on() || RunIntent.stopped()) { this.stop = null; this.message = ''; return; }
     // A reconnect or an auto-start brings the bot back by itself; anything else the player started waits too.
-    if (!World.inWorld() || Reconnect.active() || AutoStart.pending() || Alchemy.run || Alchemy.pending || Stall.run || Trade.run || Restock.trip || Restock.recording || Resurrect.trip || BuffGear.run) return;
+    if (!World.inWorld() || Reconnect.active() || AutoStart.pending() || Alchemy.active() || Stall.run || Trade.run || Restock.trip || Restock.recording || Resurrect.trip || BuffGear.run) return;
     const left = Math.max(s.at, Manual.lastAt, this.playerAt) + RETRY_DELAY_MS - now();
     if (left > 0 || !World.local() || World.gp?.inventoryPending) {
       this.message = 'The bot stopped by itself' + this.why(s.reason) + '; starting again in ' + Math.max(1, Math.ceil(left / 1000)) + ' s.';

@@ -247,7 +247,7 @@ const UI = {
     // Busy comes from the live trips, not from Controller.mode: that label lags a tick behind (it still says
     // "returning" for up to 100 ms after Stop all ended a walk-back).
     const busy = Town.trip ? 'Town trip' : WalkBack.active ? 'Returning' : Reconnect.active() ? 'Reconnecting' : Restock.trip ? 'Shopping'
-      : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.run || Alchemy.pending ? 'Alchemy' : Stall.run ? 'Stall' : SellStar.run ? 'Sell Star' : '';
+      : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.active() ? 'Alchemy' : Stall.run ? 'Stall' : SellStar.run ? 'Sell Star' : '';
     const label = dead ? 'Dead' : error ? 'Error' : busy || (Hunt.running ? 'Hunting' : 'Stopped');
     // `note` is what only the state can say; the icon falls back to the first wait reason, which the wide window shows below the strip.
     const note = Town.trip ? Town.status() : Travel.active ? Travel.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
