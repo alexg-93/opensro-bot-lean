@@ -540,6 +540,7 @@ const Alchemy = {
     // A new row starts from the goals last used (the single-item settings), then is edited on its own.
     rows.push({ refObjId: item.refObjId, slot: item.slot, goals: alchemyGoals(this.cfg()) });
     this.rowStatus.set(rows.at(-1), 'Waiting'); this.editRow = rows.length - 1; Settings.saveProfile();
+    if (!this.queue && !this.run) this.message = 'Item added. Set its goals below, then press Start queue.';
   },
   removeRow(index) {
     if (this.queue) return UI.toast('Stop the queue before removing items.', 'warn');
