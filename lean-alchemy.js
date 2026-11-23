@@ -611,16 +611,23 @@ const Alchemy = {
     const reject = text => { this.message = text; UI.toast(text, 'warn'); }, rows = this.rows();
     const blocked = this.blocked(); if (blocked) return reject(blocked);
     if (!rows.length) return reject('Add an item from your bag to the queue first.');
-    this.queue = { row: rows[0], step: 'plus', character: World.charName, manualAt: Manual.lastAt, done: 0, skipped: 0, totals: this.emptyTotals(), nextAt: 0, waitSince: 0 };
+    this.queue = { row: rows[0], step: 'plus', character: World.charName, manualAt: Manual.lastAt, done: 0, skipped: 0, totals: this.emptyTotals(), nextAt: 0, waitSince: 0,
+      spent: 0n, lastBought: false };
     for (const row of rows) this.rowStatus.set(row, 'Waiting');
     this.result = this.queue.totals; this.message = 'Queue started.';
     this.note(`Queue started: ${rows.length} item${rows.length > 1 ? 's' : ''}.`);
     this.buyFor(rows);
   },
-  // With buying on, a visit to the alchemy merchant for what `rows` still need. True when one started.
+  // With buying on, a visit to the alchemy merchant for what `rows` still need, within what is left of the queue's gold
+  // limit. True when one started.
   buyFor(rows) {
-    if (!this.cfg().buy?.on) return false;
-    const error = AlchemyBuy.start(rows, () => { if (this.queue) this.queue.nextAt = now() + this.delay(); });
+    const q = this.queue;
+    if (!this.cfg().buy?.on || !q) return false;
+    const left = toBigInt(this.cfg().buy.spend) - q.spent;
+    const error = AlchemyBuy.start(rows, done => {
+      if (this.queue !== q) return;
+      q.spent += done.spent; q.lastBought = done.bought > 0; q.nextAt = now() + this.delay();
+    }, left > 0n ? left : 0n);
     if (error && error !== 'Nothing to buy.') this.note('Not buying: ' + error);
     return !error;
   },
@@ -664,8 +671,10 @@ const Alchemy = {
   },
   queueMissing(reason, buyable = true) {
     const q = this.queue, name = this.rowName(q.row), text = reason.charAt(0).toUpperCase() + reason.slice(1);
-    // Once per item: buy what it and the items after it need, then try the same step again.
-    if (buyable && q.boughtFor !== q.row) {
+    // Buy what it and the items after it need, then try the same step again: the first time an item runs short, and
+    // again as long as the last visit bought something. It ends at the queue's gold limit, or when nothing more is sold.
+    if (buyable && (q.boughtFor !== q.row || q.lastBought)) {
+      q.lastBought = false;
       q.boughtFor = q.row;
       const rows = this.rows();
       if (this.buyFor(rows.slice(rows.indexOf(q.row)))) { this.rowStatus.set(q.row, 'Buying materials'); this.note(`${name}: ${text} Buying more.`); return; }
@@ -717,10 +726,10 @@ const Alchemy = {
       UI.number('Each Luck / Steady / Immortal / Astral stone to have', () => b().stock.protect, n => b().stock.protect = n, 0, 1000),
       UI.number('Each white stone to have', () => b().stock.white, n => b().stock.white = n, 0, 1000),
       UI.number('Each blue stone to have', () => b().stock.blue, n => b().stock.blue = n, 0, 1000),
-      UI.gold('Spend at most this much gold per visit', () => b().spend, n => b().spend = n),
+      UI.gold('Spend at most this much gold per queue run', () => b().spend, n => b().spend = n),
       UI.gold('Always keep this much gold', () => b().keep, n => b().keep = n),
       UI.alchemyBuyList,
-      el('p', 'Off by default. With it on, the queue first visits "OpenSRO Alchemy" in Jangan and tops up what the queued items need, at the degree of each item, to the amounts above; when an item runs out on the way, it goes once more before skipping it. It never spends more than the limit per visit or goes below the gold to keep, and it stops when a purchase is not confirmed. Start the queue in Jangan. Only what the merchant sells is bought.', 'muted'));
+      el('p', 'Off by default. With it on, the queue first visits "OpenSRO Alchemy" in Jangan and tops up what the queued items need, at the degree of each item, to the amounts above. When an item runs out on the way, it goes back as long as the last visit bought something. One queue run never spends more than the limit or goes below the gold to keep, and buying stops when a purchase is not confirmed. Start the queue in Jangan. Only what the merchant sells is bought.', 'muted'));
     UI.pane.append(buy);
     // Goals of the selected row
     const goals = UI.group('Goals'), tabs = el('div', null, 'subtabs');

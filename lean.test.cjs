@@ -8129,7 +8129,7 @@ const BUY_ELIXIR = { refObjId: 3679, name: 'Elixir (weapon)', tab: 0, slot: 1, p
 const BUY_STR = { refObjId: 6687, name: 'Str stone', tab: 2, slot: 0, price: '2000000', maxStack: 20 };
 function buyFixture({ offers = [BUY_ELIXIR, BUY_STR], gold = '200000000', answer = true } = {}) {
   const f = queueFixture(), gp = () => f.World.gp, b = f.Settings.profile.alchemy.buy;
-  b.on = true;
+  b.on = true; b.spend = 20000000;
   const pose = f.World.pose(), npc = { gid: 500, kind: 'npc', name: 'OpenSRO Alchemy - Jangan', refObjId: 9999, regionId: pose.regionId, x: pose.x + 20, y: pose.y, z: pose.z };
   f.World.ents.set(npc.gid, npc);
   gp().progression.gold = gold; gp().alchemy.visible = false;
@@ -8149,7 +8149,9 @@ function buyFixture({ offers = [BUY_ELIXIR, BUY_STR], gold = '200000000', answer
         if (!answer) continue;
         const offer = offers.find(o => o.tab === cmd.tab && o.slot === cmd.slot);
         g.progression.gold = String(BigInt(g.progression.gold) - BigInt(offer.price) * BigInt(cmd.quantity));
-        const row = g.inventory.find(i => i.refObjId === offer.refObjId); if (row) row.quantity += cmd.quantity;
+        const row = g.inventory.find(i => i.refObjId === offer.refObjId);
+        if (row) row.quantity += cmd.quantity;
+        else g.inventory.push({ slot: 40 + g.inventory.length, refObjId: offer.refObjId, typeFlags: offer.typeFlags ?? 0x0dec, quantity: cmd.quantity });
       } else f.sentLater = (f.sentLater || []).concat(cmd);
     }
   };
@@ -8186,6 +8188,28 @@ test('alchemy buying: the gold to keep is never spent, and what the merchant doe
   assert.ok(f.Alchemy.log.some(l => /Not bought: weapon elixir \(not sold here\)/.test(l.text)));
   const poor = buyFixture({ gold: '1000000' }); poor.Alchemy.startQueue();
   assert.equal(poor.AlchemyBuy.run, null); assert.ok(poor.Alchemy.log.some(l => /Not buying: Not enough gold/.test(l.text)));
+});
+test('alchemy buying: stones that keep running out are bought again until the queue gold limit', () => {
+  // Live 1.2.283: a 20 million limit per visit bought 10 Int stones; when they ran out the item was skipped after one
+  // more visit, so the other blues were never bought. Now every run-out buys again while a visit still buys something.
+  const f = buyFixture({ offers: [BUY_STR] }), cfg = f.Settings.profile.alchemy;
+  f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 20 && i.slot !== 14);
+  cfg.queue[0].goals.target = 0; cfg.queue[1].goals.blue.targets.MATTR_STR = 6;
+  cfg.buy.stock.blue = 1; cfg.buy.spend = 6000000;
+  // Every Str fusion fails: the stone is used up and the bag runs out again.
+  const answer = () => {
+    const sent = (f.sentLater || []).splice(0).filter(c => c.kind === 'alchemy-start');
+    for (const c of sent) {
+      const g = f.World.gp, inventory = g.inventory.map(i => i.slot === c.slots[1] ? { ...i, quantity: i.quantity - 1 } : i).filter(i => i.quantity > 0);
+      f.World.applyGameplay({ ...g, inventory, inventoryPending: false, alchemy: { ...g.alchemy, pending: false, flags: 0, slot: c.slots[0], error: 0x23 } });
+    }
+  };
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 200 && f.Alchemy.queue; i++) { f.step(1000); answer(); }
+  assert.equal(f.stats.buys.length, 3, '6 million buys three Str stones, one per visit');
+  assert.ok(f.Alchemy.log.some(l => /The gold limit of this queue \(6\.000\.000\) is used up/.test(l.text)));
+  assert.match(f.Alchemy.rowStatus.get(cfg.queue[1]), /Skipped: No Str stone/);
+  assert.equal(f.World.gp.progression.gold, String(200000000 - 6000000), 'never more than the queue limit');
 });
 test('alchemy buying: the merchant is remembered once seen and walked to from further away', () => {
   const f = buyFixture(); f.Alchemy.startQueue(); f.step();

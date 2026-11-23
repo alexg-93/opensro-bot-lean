@@ -62,11 +62,12 @@ const AlchemyBuy = {
     const saved = this.cfg().merchant;
     return saved?.refObjId ? saved : ALCHEMY_MERCHANT.regionId ? ALCHEMY_MERCHANT : null;
   },
-  // Gold this visit may spend: the per-visit limit, and never below the gold to keep.
-  budget() { const c = this.cfg(), free = this.gold() - toBigInt(c.keep); return free < 1n ? 0n : free < toBigInt(c.spend) ? free : toBigInt(c.spend); },
-  // Starts a visit for the queued rows. Returns '' when it started, else why not. `onDone(summary)` runs when it ends,
-  // bought or not; the queue then carries on with what is in the bag.
-  start(rows, onDone) {
+  // Gold this visit may spend: what is left of the queue's limit (`limit`, the whole limit when not given), and never
+  // below the gold to keep.
+  budget(limit = toBigInt(this.cfg().spend)) { const free = this.gold() - toBigInt(this.cfg().keep), cap = free < limit ? free : limit; return cap < 1n ? 0n : cap; },
+  // Starts a visit for the queued rows. Returns '' when it started, else why not. `onDone({ text, spent, bought })` runs
+  // when it ends, bought or not; the queue then carries on with what is in the bag.
+  start(rows, onDone, limit = toBigInt(this.cfg().spend)) {
     if (this.run) return 'A purchase is already running.';
     if (!this.cfg().on) return 'Buying is off.';
     const list = this.shortfall(rows);
@@ -74,9 +75,10 @@ const AlchemyBuy = {
     const spec = this.merchant();
     if (!spec) return 'The alchemy merchant is not known here; stand in Jangan near "OpenSRO Alchemy".';
     if (!(dist2D(World.pose(), spec) <= 3000)) return 'Too far from the Jangan alchemy merchant; go to Jangan first.';
-    if (this.budget() < 1n) return 'Not enough gold above the amount to keep.';
+    if (limit < 1n) return `The gold limit of this queue (${fmtGold(this.cfg().spend)}) is used up.`;
+    if (this.budget(limit) < 1n) return 'Not enough gold above the amount to keep.';
     this.run = { stage: 'prep', rows, spec, list, onDone, at: now(), manualAt: Manual.lastAt, character: World.charName, pend: null, open: null,
-      startGold: this.gold(), budget: this.budget(), got: {}, skipped: [] };
+      startGold: this.gold(), budget: this.budget(limit), got: {}, skipped: [] };
     Alchemy.note(`Buying: ${list.map(n => `${n.missing} ${n.label}`).join(', ')} (up to ${fmtGold(this.run.budget)} gold).`);
     this.message = 'Going to the alchemy merchant.';
     return '';
@@ -92,7 +94,7 @@ const AlchemyBuy = {
       (r.skipped.length ? ` Not bought: ${r.skipped.join(', ')}.` : '');
     this.message = text; Alchemy.note(text);
     if (!ok) { Log.warn('Alchemy: ' + text); UI.toast(text, 'warn', 6000); }
-    r.onDone?.(text);
+    r.onDone?.({ text, spent: spent > 0n ? spent : 0n, bought: Object.values(r.got).reduce((n, k) => n + k, 0) });
   },
   tick() {
     const r = this.run;

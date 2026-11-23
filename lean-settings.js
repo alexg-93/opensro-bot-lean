@@ -17,8 +17,8 @@ const DEFAULT_PROFILE = {
     // when the item is added). onMissing: 'next' moves on when an item runs out of materials, 'stop' stops the queue.
     queue: [], delay: 1000, onMissing: 'next', queueSound: false,
     // Buying what the queue needs at the Jangan alchemy merchant (lean-alchemy-buy.js). Off by default: it spends gold.
-    // stock: how many of each to have in the bag after a visit. spend: the most gold one visit may spend; keep: gold never spent.
-    buy: { on: false, stock: { elixir: 50, powder: 30, protect: 6, white: 20, blue: 20 }, spend: 20000000, keep: 1000000,
+    // stock: how many of each to have in the bag after a visit. spend: the most gold one queue run may spend; keep: gold never spent.
+    buy: { on: false, stock: { elixir: 50, powder: 30, protect: 6, white: 20, blue: 20 }, spend: 100000000, keep: 1000000,
       // Where the merchant was last seen (filled in by the bot): { refObjId, regionId, x, y, z }.
       merchant: null } },
   statPoints: { enabled: false, str: 1, int: 0, reserve: 0 },
