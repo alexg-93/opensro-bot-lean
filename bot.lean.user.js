@@ -18868,9 +18868,12 @@ const Live = {
   // A Reload from the dashboard, for a game server restart the page did not recover from. Only when the player allowed it,
   // never while the character is in the game (a healthy page is not cut off in the middle of a trip or an alchemy queue), and
   // not while a page that was just reloaded is still logging back in. It is the reload after a failed load, so the character
-  // comes back and hunting resumes if it was hunting.
+  // comes back and hunting resumes if it was hunting. The guard lasts RELOAD_GUARD_MS (a late order lives up to 90 s, plus the
+  // reload itself), not until the character is back: a page the server keeps out can be reloaded again.
+  RELOAD_GUARD_MS: 180000,
   reload() {
-    if (Settings.profile.live.reload !== true || World.inWorld() || Reconnect.intent?.reloaded) return false;
+    const i = Reconnect.intent;
+    if (Settings.profile.live.reload !== true || World.inWorld() || i?.reloaded && now() - i.since < this.RELOAD_GUARD_MS) return false;
     Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
     Reconnect.reloadPage('dashboard');
     return true;

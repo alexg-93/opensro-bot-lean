@@ -10171,6 +10171,9 @@ async function updateTests() {
     assert.ok(f.Log.lines.some(e => e.text === 'Page reloaded from the live dashboard; restoring Tester.'));
     assert.deepEqual([f.Reconnect.intent.character, f.Reconnect.intent.hunting], ['Tester', true]);
     assert.equal(f.Live.command('reload'), false, 'a second Reload while the reloaded page logs back in is ignored'); assert.equal(reloads, 1);
+    f.advance(f.Live.RELOAD_GUARD_MS + 1000);
+    assert.equal(f.Reconnect.intent?.reloaded, true, 'still not back in the game (the server is still down)');
+    assert.equal(f.Live.command('reload'), true, 'a page that never got back in can be reloaded again'); assert.equal(reloads, 2);
   });
 
   test('a Reload from the dashboard after the automatic reloads gave up, or after a long outage, still brings the character back', () => {
