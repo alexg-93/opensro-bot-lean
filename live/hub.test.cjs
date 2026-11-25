@@ -69,7 +69,11 @@ const raw = text => new Promise(done => {
   assert.equal(answer.headers.get('access-control-allow-origin'), '*');
   assert.deepEqual(await answer.json(), { cmd: 'stop' });
   assert.equal((await post(JSON.stringify({ name: 'Tester', control: true }))).status, 204, 'handed out once');
+  assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 0 }, 'Start and Stop allowed is not Reload allowed');
+  assert.equal((await post(JSON.stringify({ name: 'Tester', control: true, reload: true, inWorld: true }))).status, 204);
+  assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 0 }, 'a character in the game is never reloaded');
+  assert.equal((await post(JSON.stringify({ name: 'Tester', control: true, reload: true, inWorld: false }))).status, 204);
   assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 1 }, 'Reload: for a page a game server restart left behind');
-  assert.deepEqual(await (await post(JSON.stringify({ name: 'Tester', control: true, inWorld: false }))).json(), { cmd: 'reload' });
+  assert.deepEqual(await (await post(JSON.stringify({ name: 'Tester', reload: true, inWorld: false }))).json(), { cmd: 'reload' });
   console.log('ok');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => hub.kill());

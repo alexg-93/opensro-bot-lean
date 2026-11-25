@@ -151,8 +151,12 @@ try {
     assert.equal(answer.headers.get('access-control-allow-origin'), '*', 'the game page must be able to read it');
     assert.deepEqual(await answer.json(), { cmd: 'stop' });
     assert.equal((await post(env, snap({ control: true }))).status, 204, 'handed out once');
-    assert.deepEqual(await (await command({ cmd: 'reload', name: 'Tester' })).json(), { sent: 1 });
-    assert.deepEqual(await (await post(env, snap({ control: true, inWorld: false }))).json(), { cmd: 'reload' }, 'Reload, for a page left on the login screen');
+    assert.deepEqual(await (await command({ cmd: 'reload', name: 'Tester' })).json(), { sent: 0 }, 'Start and Stop allowed (or an older bot) is not Reload allowed');
+    assert.equal((await post(env, snap({ control: true, reload: true }))).status, 204);
+    assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 0 }, 'a character in the game is never reloaded');
+    assert.equal((await post(env, snap({ reload: true, inWorld: false }))).status, 204);
+    assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 1 });
+    assert.deepEqual(await (await post(env, snap({ reload: true, inWorld: false }))).json(), { cmd: 'reload' }, 'Reload, for a page left on the login screen');
     assert.equal((await post(env, snap({ name: 'Watched' }))).status, 204);
     clock += 91000;
     assert.equal((await post(env, snap({ name: 'Gone', control: true }))).status, 204, 'a command older than 90 s is dropped');

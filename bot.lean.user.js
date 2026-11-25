@@ -266,8 +266,9 @@ const DEFAULT_PROFILE = {
   // Discord session reports (lean-reporter.js). The webhook URL is a secret and lives in Store, never here.
   sessionReport: { on: false, minutes: 3 },
   // Live dashboard (lean-live.js). The hub address and code are a secret and live in Store, never here.
-  // control: the dashboard may start, stop and reload this character (off unless the player turns it on).
-  live: { on: false, seconds: 10, control: false },
+  // control: the dashboard may start and stop this character; reload: it may reload this character's page while it is not in
+  // the game. Both are off unless the player turns them on.
+  live: { on: false, seconds: 10, control: false, reload: false },
 };
 // The goals of one alchemy queue row: the single-item fields of DEFAULT_PROFILE.alchemy (target +, stones, white and blue
 // targets), without the queue's own fields.
@@ -304,6 +305,7 @@ function botProfile(input) {
   result.live.seconds = Number.isInteger(liveSeconds) ? Math.min(60, Math.max(3, liveSeconds)) : DEFAULT_PROFILE.live.seconds;
   result.live.on = result.live.on === true;
   result.live.control = result.live.control === true;
+  result.live.reload = result.live.reload === true;
   if (!['death', 'recall'].includes(result.potion.restock.town.deathReturn)) result.potion.restock.town.deathReturn = 'recall';
   if (!['reverse', 'walk'].includes(result.potion.restock.town.returnBy)) result.potion.restock.town.returnBy = 'reverse';
   // Reverse Return Scrolls used to have two switches: a gold-merchant one (no merchant sells them) and the Item mall
@@ -13953,8 +13955,10 @@ const Reconnect = {
   },
   // Save what to resume, then reload. Shared by a failed load and an expired session; the wait before it grows with
   // every reload in a row (reloadWait), and reloading stops after 12 hours without getting back into the game.
+  // A reload the player asked for from the live dashboard starts a new streak, never gives up, and brings back the last
+  // character even from an old snapshot (a long server restart).
   reloadPage(why) {
-    const data = this.load(), streak = this.reloadStreak();
+    const asked = why === 'dashboard', data = this.load(), streak = asked ? null : this.reloadStreak();
     if (streak && Date.now() - streak.first > this.GIVE_UP_MS) {
       if (!this.gaveUp) {
         this.gaveUp = true; this.message = 'Reloaded the page ' + streak.count + ' times over 12 hours without getting back in; not reloading again. Reload the page yourself when the server is back.';
@@ -13962,7 +13966,7 @@ const Reconnect = {
       }
       return false;
     }
-    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.SNAP_MS ? data.snap : null;
+    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && (asked || Date.now() - data.snap.at < this.SNAP_MS) ? data.snap : null;
     this.save({ snap: data.snap, reloads: { count: (streak?.count || 0) + 1, first: streak?.first || Date.now(), last: Date.now() },
       pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now(), ...(why ? { why } : {}) } : null });
     this.doReload();
@@ -18737,8 +18741,9 @@ const Live = {
       hp: Math.round(vitals.hpPct), mp: Math.round(vitals.mpPct),
       hpNow: Math.round(vitals.hp), hpMax: Math.round(vitals.maxHp), mpNow: Math.round(vitals.mp), mpMax: Math.round(vitals.maxMp),
       inWorld: World.inWorld(), dead: World.isDead(), running: !!Hunt.running, state: String(Hunt.state || ''),
-      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start, stop and reload it.
-      active: botActive(), control: Settings.profile.live.control === true,
+      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start and stop it;
+      // reload: it may reload the page while the character is not in the game (older bots send no reload, so they get none).
+      active: botActive(), control: Settings.profile.live.control === true, reload: Settings.profile.live.reload === true,
       note: String(Reconnect.message || '').slice(0, 120),
       pos: pose ? { region: pose.regionId, x: Math.round(pose.x), z: Math.round(pose.z) } : null,
       stats, session,
@@ -18849,21 +18854,25 @@ const Live = {
       this.sending = false;
     }
   },
-  // A Start, Stop or Reload from the dashboard, only when the player allowed it for this character. It does what the panel's
-  // buttons do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because
-  // it toggles. Reload is for a game server restart the page did not recover from: the same reload as after a failed load,
-  // which brings the character back in and resumes hunting if it was hunting.
+  // A Start or Stop from the dashboard, only when the player allowed it for this character. It does what the panel's buttons
+  // do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because it toggles.
   command(cmd) {
-    if (Settings.profile.live.control !== true || !['start', 'stop', 'reload'].includes(cmd)) return false;
-    if (cmd === 'reload') {
-      Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
-      if (!Reconnect.reloadPage('dashboard')) Reconnect.doReload(); // also after the automatic reloads gave up: the player asked for this one
-      return true;
-    }
+    if (cmd === 'reload') return this.reload();
+    if (Settings.profile.live.control !== true || (cmd !== 'start' && cmd !== 'stop')) return false;
     if (cmd === 'stop') userStop();
     else if (botActive()) return false;
     else { toggleBot(); if (!Hunt.running) return false; }
     Activity.emit({ category: 'session', code: 'dashboard-' + cmd, level: 'info', text: (cmd === 'stop' ? 'Stopped' : 'Started') + ' from the live dashboard.' });
+    return true;
+  },
+  // A Reload from the dashboard, for a game server restart the page did not recover from. Only when the player allowed it,
+  // never while the character is in the game (a healthy page is not cut off in the middle of a trip or an alchemy queue), and
+  // not while a page that was just reloaded is still logging back in. It is the reload after a failed load, so the character
+  // comes back and hunting resumes if it was hunting.
+  reload() {
+    if (Settings.profile.live.reload !== true || World.inWorld() || Reconnect.intent?.reloaded) return false;
+    Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
+    Reconnect.reloadPage('dashboard');
     return true;
   },
   // Short reasons only: never the address, the code or a response body.
@@ -21089,12 +21098,13 @@ const UI = {
       this.liveSetupHelp(),
       this.check('Send live stats to my hub', () => Settings.profile.live.on, v => { Settings.profile.live.on = v; Live.tick(); }),
       this.number('Send every (seconds)', () => Settings.profile.live.seconds, v => Settings.profile.live.seconds = v, 3, 60),
-      this.check('Allow Start, Stop and Reload from the dashboard', () => Settings.profile.live.control, v => { Settings.profile.live.control = v; }),
+      this.check('Allow Start and Stop from the dashboard', () => Settings.profile.live.control, v => { Settings.profile.live.control = v; }),
+      this.check('Allow Reload from the dashboard', () => Settings.profile.live.reload, v => { Settings.profile.live.reload = v; }),
       this.field('Pair link or hub address', address),
       this.field('Hub code', code),
       this.button('Send a test report', () => { void Live.send(true).catch(() => {}); }),
       this.liveNote,
-      el('p', 'Shows this character on a phone dashboard served by your own hub (a Cloudflare Worker on your account, or live/hub.js behind an HTTPS tunnel). The data goes only to that hub. The address and code stay in this browser and are never part of share codes, backups or bug reports. The hub must be reachable over HTTPS. With Start, Stop and Reload allowed, anyone who has your dashboard link can start, stop and reload this character.', 'muted')));
+      el('p', 'Shows this character on a phone dashboard served by your own hub (a Cloudflare Worker on your account, or live/hub.js behind an HTTPS tunnel). The data goes only to that hub. The address and code stay in this browser and are never part of share codes, backups or bug reports. The hub must be reachable over HTTPS. With Start and Stop allowed, anyone who has your dashboard link can start and stop this character. With Reload allowed, they can reload its game page while it is not in the game, for example after a game server restart.', 'muted')));
   },
   // The pairing request from a #nixlive link. Nothing is saved until Pair is pressed.
   showPairing() {

@@ -382,7 +382,7 @@ function derive(s) {
   const ksText = nearby && nearby.attacker ? nearby.attacker + ' is fighting your target' : '';
   return {
     name: s.name, bot: s.bot || '', level: s.level, kind, label, state, note, dead: !!s.dead,
-    control: s.control === true, active: typeof s.active === 'boolean' ? s.active : !!s.running, // older bots send no `active`
+    control: s.control === true, reload: s.reload === true, inWorld: s.inWorld === true, active: typeof s.active === 'boolean' ? s.active : !!s.running, // older bots send no `active`
     age, late, stale, seenAt: s.at,
     hp: pctOf(hpNow, hpMax, s.hp), mp: pctOf(mpNow, mpMax, s.mp), xpPct: s.xpPct == null ? null : clampPct(s.xpPct),
     pos: s.pos ? 'Region ' + s.pos.region + ' (' + s.pos.x + ', ' + s.pos.z + ')' : '',
@@ -529,10 +529,14 @@ function renderChrome({ bots: list, conn: state, summary }) {
   for (const b of $('seg').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.view === view.mode));
   // A link problem is shown even when old cards are still on screen.
   const ctl = list.filter(canCommand);
-  $('ctl').hidden = !list.some(b => b.control) || state !== 'live';
+  $('ctl').hidden = !list.some(b => b.control || b.reload) || state !== 'live';
+  $('startAll').hidden = $('stopAll').hidden = !list.some(b => b.control);
+  $('reloadAll').hidden = !list.some(b => b.reload);
   $('startAll').disabled = !ctl.some(b => !b.active && !sent.has(b.name));
   $('stopAll').disabled = !ctl.some(b => b.active && !sent.has(b.name));
+  for (const [name, at] of reloading) if (list.some(b => b.name === name && b.inWorld) || Date.now() - at > SENT_MS) reloading.delete(name);
   $('reloadAll').disabled = !list.some(canReload);
+  $('reloadAll').textContent = reloading.size ? 'Reload sent…' : 'Reload all';
   const e = $('empty'), problem = state === 'wrong' || state === 'noset' || state === 'nolink';
   e.hidden = list.length > 0 && !problem;
   if (!e.hidden) fill(e, { t: emptyCopy().title, h: emptyCopy().hint });
@@ -545,13 +549,16 @@ $('seg').addEventListener('click', e => {
 });
 
 // ===== Start / Stop =====
-// Shown only for characters whose player switched on "Allow Start, Stop and Reload from the dashboard" in NIX. The hub hands the
+// Shown only for characters whose player switched on "Allow Start and Stop from the dashboard" in NIX. The hub hands the
 // command to the bot with its next report, so the button says "Sent…" until the bot's next report shows the change.
 const sent = new Map(); // name -> { at, active } while a command is on its way
 const SENT_MS = 90000; // the hub's order lifetime (reports come up to 60 s apart); after this the button comes back
 const canCommand = b => conn.state === 'live' && b.control && b.kind !== 'offline' && b.kind !== 'away';
-// A page left on the login screen by a game server restart is "away" but still reporting, and that is the one to reload.
-const canReload = b => conn.state === 'live' && b.control && b.kind !== 'offline';
+// Reload is for a page a game server restart left out of the game (on the login screen it still reports, as "away"); a
+// character in the game is never reloaded. A Reload on its way blocks another until the character is back in the game or
+// the order has expired, so a second tap cannot reload a page again while it logs in.
+const reloading = new Map(); // name -> when its Reload was sent
+const canReload = b => conn.state === 'live' && b.reload && b.kind !== 'offline' && !b.inWorld && !reloading.has(b.name);
 function paintAct(btn, b) {
   btn.parentElement.hidden = !b.control; // the wrapper, so a card without the button keeps no empty grid row
   if (!b.control) return;
@@ -581,13 +588,17 @@ async function command(cmd, list, all = false) {
   if (!count) for (const b of list) sent.delete(b.name);
   const word = { stop: 'Stop', start: 'Start', reload: 'Reload' }[cmd];
   say(count === null ? word + ' could not be sent. Check the connection and try again.'
-    : !count ? 'No character took the ' + word + ': switch on "Allow Start, Stop and Reload from the dashboard" in NIX.'
+    : !count ? 'No character took the ' + word + ': switch on "' + (cmd === 'reload' ? 'Allow Reload' : 'Allow Start and Stop') + ' from the dashboard" in NIX.'
     : word + ' sent' + (all ? ' to ' + count + ' character' + (count > 1 ? 's' : '') : '') + '. It reaches the bot with its next report.');
   emit();
+  return count;
 }
-$('reloadAll').addEventListener('click', () => {
-  const n = [...bots.values()].map(x => derive(x.snap)).filter(canReload).length;
-  if (n && confirm('Reload the game page of ' + n + ' character' + (n > 1 ? 's' : '') + '? Each one logs back in and resumes what it was doing.')) command('reload', [], true);
+$('reloadAll').addEventListener('click', async () => {
+  const list = [...bots.values()].map(x => derive(x.snap)).filter(canReload), n = list.length;
+  if (!n || !confirm('Reload the game page of ' + n + ' character' + (n > 1 ? 's' : '') + ' not in the game? Each one logs back in and resumes hunting if it was hunting.')) return;
+  for (const b of list) reloading.set(b.name, Date.now());
+  if (!await command('reload', [], true)) for (const b of list) reloading.delete(b.name);
+  emit();
 });
 for (const [id, cmd] of [['startAll', 'start'], ['stopAll', 'stop']]) {
   $(id).addEventListener('click', () => {

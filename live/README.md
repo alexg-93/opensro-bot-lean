@@ -79,11 +79,11 @@ Do not also turn on the bot's Live dashboard for the same hub; the two would rep
 
 ## Start, stop and reload from the phone
 
-Turn on **Allow Start, Stop and Reload from the dashboard** in the bot's Settings, Live dashboard, for each character you want to control (it is off by default, per character). The dashboard then shows a **Start** or **Stop** button on that character's card (in List view: in the opened row), and **Start all**, **Stop all** and **Reload all** on top, which ask first.
+Turn on **Allow Start and Stop from the dashboard** in the bot's Settings, Live dashboard, for each character you want to control (it is off by default, per character). The dashboard then shows a **Start** or **Stop** button on that character's card (in List view: in the opened row), and **Start all** and **Stop all** on top, which ask first. **Allow Reload from the dashboard** is a separate switch, also off by default, for **Reload all**.
 
 - **Stop** does what the panel's **Stop all** does, so it also cancels auto-start. **Start** does what **Start / stop** does, and only while the bot is stopped, so a late Start never stops a bot.
 - The command reaches the bot with its next report (every 10 seconds by default). The button shows **Sent…** until the dashboard sees the change. A command not picked up within 90 seconds is dropped, so a bot that comes back later does not act on an old one.
-- **Reload all** is for a game server restart or update the game pages did not recover from by themselves. It fully reloads the game page of every character that allows it and reported in the last 90 seconds, including a page left on the login screen. It is the same reload NIX does after a failed load: NIX enters the world again and resumes hunting if it was hunting.
+- **Reload all** is for a game server restart or update the game pages did not recover from by themselves. It fully reloads the game page of every character that allows Reload, reported in the last 90 seconds and is not in the game, such as a page left on the login screen. A character in the game is never reloaded, and a page that was just reloaded is not reloaded again while it logs back in. It is the same reload NIX does after a failed load: NIX enters the world again and resumes hunting if it was hunting, even after a long restart. The button shows **Reload sent…** until those characters are back in the game (at most 90 seconds).
 - Anyone who has your dashboard link can start, stop and reload the characters that allow it, so keep the link private, as always.
 - It works with the Worker and with `hub.js` and the bot's built-in Live dashboard. Characters that do not allow it, older bots and the separate reporter script (Local only) show no button.
 
@@ -97,7 +97,8 @@ Turn on **Allow Start, Stop and Reload from the dashboard** in the bot's Setting
 | "Off: Hub refused the code." in NIX | The code changed. Pair again with the new pair link. |
 | "No answer from the hub" in NIX | The hub address is wrong or unreachable, or it is not HTTPS. Test the address in a browser. |
 | "hub unreachable, retrying…" on the dashboard | The hub or tunnel stopped. |
-| "No character took the Start" (or Stop, or Reload) | Turn on Allow Start, Stop and Reload from the dashboard in that character's Settings, Live dashboard. |
+| "No character took the Start" (or Stop) | Turn on Allow Start and Stop from the dashboard in that character's Settings, Live dashboard. |
+| "No character took the Reload" | Turn on Allow Reload from the dashboard in that character's Settings. Reload goes only to characters that are not in the game, and older bots ignore it. |
 | "Port 4173 is in use" | The hub is already running in another window. To use another port, set `PORT` (macOS / Linux: `PORT=4180 node hub.js`). |
 | Stats stop after a NIX update (reporter script only) | NIX changed what the reporter reads. The console shows `[NIX live] bot layout changed`. The built-in dashboard does not have this problem. |
 

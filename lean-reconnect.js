@@ -91,8 +91,10 @@ const Reconnect = {
   },
   // Save what to resume, then reload. Shared by a failed load and an expired session; the wait before it grows with
   // every reload in a row (reloadWait), and reloading stops after 12 hours without getting back into the game.
+  // A reload the player asked for from the live dashboard starts a new streak, never gives up, and brings back the last
+  // character even from an old snapshot (a long server restart).
   reloadPage(why) {
-    const data = this.load(), streak = this.reloadStreak();
+    const asked = why === 'dashboard', data = this.load(), streak = asked ? null : this.reloadStreak();
     if (streak && Date.now() - streak.first > this.GIVE_UP_MS) {
       if (!this.gaveUp) {
         this.gaveUp = true; this.message = 'Reloaded the page ' + streak.count + ' times over 12 hours without getting back in; not reloading again. Reload the page yourself when the server is back.';
@@ -100,7 +102,7 @@ const Reconnect = {
       }
       return false;
     }
-    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.SNAP_MS ? data.snap : null;
+    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && (asked || Date.now() - data.snap.at < this.SNAP_MS) ? data.snap : null;
     this.save({ snap: data.snap, reloads: { count: (streak?.count || 0) + 1, first: streak?.first || Date.now(), last: Date.now() },
       pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now(), ...(why ? { why } : {}) } : null });
     this.doReload();

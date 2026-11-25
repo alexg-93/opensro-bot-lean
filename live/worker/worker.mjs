@@ -14,7 +14,7 @@ Routes (same contract as live/hub.js, plus /setup):
                        character a Start, Stop or Reload.
   GET  /state          X-Code. { now, reports: [latest report per character] }
   POST /command        X-Code. Body = { cmd: 'start' | 'stop' | 'reload', name? }. Queues the command for that character, or with no
-                       name for every character reporting now, if its report says control: true. 200 { sent }.
+                       name for every character reporting now, if its report says control: true (reload: true and not in the game, for a Reload). 200 { sent }.
   GET  /pair/<code>    The code is in the path. The "ready" page: pair button, QR code for the phone. 404 on a wrong code.
   GET  /               The dashboard, or the setup page while no code exists.
   POST /setup          Creates the code once (303 to /pair/<code>). 409 when a code exists.
@@ -333,8 +333,9 @@ export class LiveRoom {
     }
     if (path === '/command' && request.method === 'POST') {
       const { cmd, name } = await request.json(), at = Date.now();
-      // Only characters whose player allowed it (control: true in their last report); no name = all of them reporting now.
-      const names = [...this.bots.values()].filter(r => r.control === true && (name === undefined ? at - r.at < ONLINE_MS : r.name === name)).map(r => r.name);
+      // Only characters whose player allowed it (control: true, or reload: true for a Reload) in their last report; no name =
+      // all of them reporting now. A Reload goes only to a page that is not in the game.
+      const names = [...this.bots.values()].filter(r => (cmd === 'reload' ? r.reload === true && r.inWorld !== true : r.control === true) && (name === undefined ? at - r.at < ONLINE_MS : r.name === name)).map(r => r.name);
       for (const n of names) this.orders.set(n, { cmd, at });
       return Response.json({ sent: names.length });
     }

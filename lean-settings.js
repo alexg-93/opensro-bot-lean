@@ -82,8 +82,9 @@ const DEFAULT_PROFILE = {
   // Discord session reports (lean-reporter.js). The webhook URL is a secret and lives in Store, never here.
   sessionReport: { on: false, minutes: 3 },
   // Live dashboard (lean-live.js). The hub address and code are a secret and live in Store, never here.
-  // control: the dashboard may start, stop and reload this character (off unless the player turns it on).
-  live: { on: false, seconds: 10, control: false },
+  // control: the dashboard may start and stop this character; reload: it may reload this character's page while it is not in
+  // the game. Both are off unless the player turns them on.
+  live: { on: false, seconds: 10, control: false, reload: false },
 };
 // The goals of one alchemy queue row: the single-item fields of DEFAULT_PROFILE.alchemy (target +, stones, white and blue
 // targets), without the queue's own fields.
@@ -120,6 +121,7 @@ function botProfile(input) {
   result.live.seconds = Number.isInteger(liveSeconds) ? Math.min(60, Math.max(3, liveSeconds)) : DEFAULT_PROFILE.live.seconds;
   result.live.on = result.live.on === true;
   result.live.control = result.live.control === true;
+  result.live.reload = result.live.reload === true;
   if (!['death', 'recall'].includes(result.potion.restock.town.deathReturn)) result.potion.restock.town.deathReturn = 'recall';
   if (!['reverse', 'walk'].includes(result.potion.restock.town.returnBy)) result.potion.restock.town.returnBy = 'reverse';
   // Reverse Return Scrolls used to have two switches: a gold-merchant one (no merchant sells them) and the Item mall

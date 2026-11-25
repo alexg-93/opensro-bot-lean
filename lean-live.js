@@ -112,8 +112,9 @@ const Live = {
       hp: Math.round(vitals.hpPct), mp: Math.round(vitals.mpPct),
       hpNow: Math.round(vitals.hp), hpMax: Math.round(vitals.maxHp), mpNow: Math.round(vitals.mp), mpMax: Math.round(vitals.maxMp),
       inWorld: World.inWorld(), dead: World.isDead(), running: !!Hunt.running, state: String(Hunt.state || ''),
-      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start, stop and reload it.
-      active: botActive(), control: Settings.profile.live.control === true,
+      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start and stop it;
+      // reload: it may reload the page while the character is not in the game (older bots send no reload, so they get none).
+      active: botActive(), control: Settings.profile.live.control === true, reload: Settings.profile.live.reload === true,
       note: String(Reconnect.message || '').slice(0, 120),
       pos: pose ? { region: pose.regionId, x: Math.round(pose.x), z: Math.round(pose.z) } : null,
       stats, session,
@@ -224,21 +225,25 @@ const Live = {
       this.sending = false;
     }
   },
-  // A Start, Stop or Reload from the dashboard, only when the player allowed it for this character. It does what the panel's
-  // buttons do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because
-  // it toggles. Reload is for a game server restart the page did not recover from: the same reload as after a failed load,
-  // which brings the character back in and resumes hunting if it was hunting.
+  // A Start or Stop from the dashboard, only when the player allowed it for this character. It does what the panel's buttons
+  // do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because it toggles.
   command(cmd) {
-    if (Settings.profile.live.control !== true || !['start', 'stop', 'reload'].includes(cmd)) return false;
-    if (cmd === 'reload') {
-      Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
-      if (!Reconnect.reloadPage('dashboard')) Reconnect.doReload(); // also after the automatic reloads gave up: the player asked for this one
-      return true;
-    }
+    if (cmd === 'reload') return this.reload();
+    if (Settings.profile.live.control !== true || (cmd !== 'start' && cmd !== 'stop')) return false;
     if (cmd === 'stop') userStop();
     else if (botActive()) return false;
     else { toggleBot(); if (!Hunt.running) return false; }
     Activity.emit({ category: 'session', code: 'dashboard-' + cmd, level: 'info', text: (cmd === 'stop' ? 'Stopped' : 'Started') + ' from the live dashboard.' });
+    return true;
+  },
+  // A Reload from the dashboard, for a game server restart the page did not recover from. Only when the player allowed it,
+  // never while the character is in the game (a healthy page is not cut off in the middle of a trip or an alchemy queue), and
+  // not while a page that was just reloaded is still logging back in. It is the reload after a failed load, so the character
+  // comes back and hunting resumes if it was hunting.
+  reload() {
+    if (Settings.profile.live.reload !== true || World.inWorld() || Reconnect.intent?.reloaded) return false;
+    Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
+    Reconnect.reloadPage('dashboard');
     return true;
   },
   // Short reasons only: never the address, the code or a response body.
