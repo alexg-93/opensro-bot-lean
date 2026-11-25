@@ -8214,6 +8214,21 @@ test('alchemy buying: the gold to keep is never spent, and what the merchant doe
   const poor = buyFixture({ gold: '1000000' }); poor.Alchemy.startQueue();
   assert.equal(poor.AlchemyBuy.run, null); assert.ok(poor.Alchemy.log.some(l => /Not buying: Not enough gold/.test(l.text)));
 });
+test('a queued item never needs its elixir picked by hand', () => {
+  // Discord: "you always have to pick the elixir by hand in a queue". A row copied the elixir picked last (the B
+  // grade); with only A elixirs in the bag it stopped on "no elixirs" until someone chose one.
+  const f = queueFixture(), cfg = f.Settings.profile.alchemy;
+  f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 14 ? { ...i, refObjId: 3675 } : i);
+  assert.equal(cfg.queue[0].goals.elixir, 0, 'a new row starts on any elixir of its kind');
+  cfg.queue[0].goals.elixir = 3679;
+  f.Alchemy.startQueue(); f.Controller.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'alchemy-start', mode: 'reinforce', slots: [13, 14] }, 'the A elixir in the bag is used');
+  // With both grades in the bag, the picked one still goes first.
+  const g = queueFixture(); g.World.gp.inventory.push({ slot: 30, refObjId: 3675, typeFlags: 0x0d6c, quantity: 5 });
+  g.Settings.profile.alchemy.queue[0].goals.elixir = 3679;
+  g.Alchemy.startQueue(); g.Controller.tick(); assert.equal(g.commands.at(-1).slots[1], 14, 'the picked B elixir');
+  g.Settings.profile.alchemy.queue.length = 0; g.Alchemy.stop();
+});
 test('a shield in the queue uses and buys shield elixirs, even when the last goals named a weapon elixir', () => {
   // Live: a shield row copied the weapon elixir picked earlier, so no shield elixir was bought or used.
   const SHIELD_ELIXIR = { refObjId: 3680, name: 'Elixir (shield)', tab: 0, slot: 2, price: '1000000', maxStack: 50, typeFlags: 0x0d6c };
@@ -8453,13 +8468,15 @@ test('alchemy requires bag weapons, valid limits, settled state and compatible m
     f => { f.World.gp.inventory[0].slot = 6; }, f => { f.World.gp.inventoryPending = true; },
     f => { f.World.gp.alchemy.pending = true; }, f => { f.World.gp.alchemy = undefined; },
     f => { f.World.gp.inventory[1].refObjId = 3678; }, f => { f.Settings.profile.alchemy.target = 0; },
-    f => { f.Settings.profile.alchemy.limit = 1.5; }, f => { f.Settings.profile.alchemy.elixir = 3675; },
+    f => { f.Settings.profile.alchemy.limit = 1.5; },
     f => { f.Settings.profile.alchemy.powder = true; f.World.gp.inventory[2].refObjId = 3683; },
     f => { f.Settings.profile.alchemy.powder = true; delete f.World.gp.inventory[0].tooltip; },
     f => { f.World.gp.stall = { phase: 'owner', mode: 0 }; }, f => { f.Hunt.running = true; }]) {
     const f = alchemyFixture(); change(f); f.Alchemy.start();
     assert.equal(f.Alchemy.run, null); assert.equal(f.commands.length, 0);
-  }
+  }  // A picked elixir that is not in the bag is only a preference: another of the same kind is used.
+  const f = alchemyFixture(); f.Settings.profile.alchemy.elixir = 3675; f.Alchemy.start(); f.Controller.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'alchemy-start', mode: 'reinforce', slots: [13, 14] });
 });
 
 test('alchemy does not accept stale flags or material consumption alone as a result', () => {

@@ -68,6 +68,12 @@ const Alchemy = {
   // The elixir picked in the goals, when it is one of this kind's; otherwise (0) any elixir of the kind. A queued item copies
   // the goals last used, so a shield or an armour piece could carry a weapon elixir it can never use.
   elixirChoice(kind, cfg = this.cfg()) { const pick = Number(cfg.elixir) || 0; return ALCHEMY_DATA.kinds[kind]?.includes(pick) ? pick : 0; },
+  // The bag elixir an attempt uses: the picked one, and when none of it is left, any other elixir of the item's kind. A
+  // pick is only a preference: a queue row must not stop on "no elixirs" with the other grade in the bag.
+  bagElixir(kind, cfg = this.cfg()) {
+    const pick = this.elixirChoice(kind, cfg), all = World.items().filter(i => this.elixir(i, kind));
+    return all.find(i => pick && i.refObjId === pick) || all[0];
+  },
   powderDegree(i) {
     if (!i || (i.typeFlags & 0xfffe) !== 0x156c || !(i.quantity > 0) || i.slot < 13) return 0;
     return i.refObjId >= 3683 && i.refObjId <= 3694 ? i.refObjId - 3682 : i.refObjId >= 3695 && i.refObjId <= 3706 ? i.refObjId - 3694 : 0;
@@ -190,7 +196,7 @@ const Alchemy = {
   powderWanted(item, cfg = this.cfg()) { return !!cfg.powder && item.plus >= this.from('powder', cfg); },
   materials(item, cfg = this.cfg()) {
     const kind = this.kind(item), degree = this.degree(item);
-    const pick = this.elixirChoice(kind, cfg), elixir = World.items().find(i => this.elixir(i, kind) && (!pick || i.refObjId === pick));
+    const elixir = this.bagElixir(kind, cfg);
     const wantPowder = this.powderWanted(item, cfg);
     const powder = wantPowder ? World.items().find(i => this.powderDegree(i) === degree && degree > 0) : null;
     return { elixir, powder, wantPowder };
@@ -216,7 +222,7 @@ const Alchemy = {
   // What the next attempts would use and how likely they are to work, from the bag and the settings.
   odds(item, cfg = this.cfg()) {
     const kind = this.kind(item); if (!kind) return null;
-    const pick = this.elixirChoice(kind, cfg), elixir = World.items().find(i => this.elixir(i, kind) && (!pick || i.refObjId === pick));
+    const elixir = this.bagElixir(kind, cfg);
     if (!elixir) return null;
     const degree = this.degree(item), powder = cfg.powder && degree > 0 ? World.items().find(i => this.powderDegree(i) === degree) : null;
     const luck = !!cfg.use?.luck;
@@ -568,7 +574,8 @@ const Alchemy = {
     if (rows.some(r => r.slot === item.slot && r.refObjId === item.refObjId)) return UI.toast('That item is already in the queue.', 'warn');
     if (rows.length >= 40) return UI.toast('The queue holds at most 40 items.', 'warn');
     // A new row starts from the goals last used (the single-item settings), then is edited on its own.
-    const goals = alchemyGoals(this.cfg()); goals.elixir = this.elixirChoice(this.kind(item), goals);
+    // A new row starts on any elixir of its kind; a pick copied from another item would only get in the way.
+    const goals = alchemyGoals(this.cfg()); goals.elixir = 0;
     rows.push({ refObjId: item.refObjId, slot: item.slot, goals });
     this.rowStatus.set(rows.at(-1), 'Waiting'); this.editRow = rows.length - 1; Settings.saveProfile();
     if (!this.queue && !this.run) this.message = 'Item added. Set its goals below, then press Start queue.';
