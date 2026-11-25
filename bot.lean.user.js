@@ -16945,6 +16945,9 @@ const Alchemy = {
   // Powder A 3683..3694 and B 3695..3706 have param1 = degree 1..12.
   // Reinforce elixirs (item data ITEM_ETC_ARCHEMY_REINFORCE_RECIPE_<KIND>_A / _B), per gear kind.
   elixir(i, kind = 'weapon') { return i && !!ALCHEMY_DATA.kinds[kind]?.includes(i.refObjId) && (i.typeFlags & 0xfffe) === 0x0d6c && i.quantity > 0 && i.slot >= 13; },
+  // The elixir picked in the goals, when it is one of this kind's; otherwise (0) any elixir of the kind. A queued item copies
+  // the goals last used, so a shield or an armour piece could carry a weapon elixir it can never use.
+  elixirChoice(kind, cfg = this.cfg()) { const pick = Number(cfg.elixir) || 0; return ALCHEMY_DATA.kinds[kind]?.includes(pick) ? pick : 0; },
   powderDegree(i) {
     if (!i || (i.typeFlags & 0xfffe) !== 0x156c || !(i.quantity > 0) || i.slot < 13) return 0;
     return i.refObjId >= 3683 && i.refObjId <= 3694 ? i.refObjId - 3682 : i.refObjId >= 3695 && i.refObjId <= 3706 ? i.refObjId - 3694 : 0;
@@ -17067,7 +17070,7 @@ const Alchemy = {
   powderWanted(item, cfg = this.cfg()) { return !!cfg.powder && item.plus >= this.from('powder', cfg); },
   materials(item, cfg = this.cfg()) {
     const kind = this.kind(item), degree = this.degree(item);
-    const elixir = World.items().find(i => this.elixir(i, kind) && (!cfg.elixir || i.refObjId === cfg.elixir));
+    const pick = this.elixirChoice(kind, cfg), elixir = World.items().find(i => this.elixir(i, kind) && (!pick || i.refObjId === pick));
     const wantPowder = this.powderWanted(item, cfg);
     const powder = wantPowder ? World.items().find(i => this.powderDegree(i) === degree && degree > 0) : null;
     return { elixir, powder, wantPowder };
@@ -17093,7 +17096,7 @@ const Alchemy = {
   // What the next attempts would use and how likely they are to work, from the bag and the settings.
   odds(item, cfg = this.cfg()) {
     const kind = this.kind(item); if (!kind) return null;
-    const elixir = World.items().find(i => this.elixir(i, kind) && (!cfg.elixir || i.refObjId === cfg.elixir));
+    const pick = this.elixirChoice(kind, cfg), elixir = World.items().find(i => this.elixir(i, kind) && (!pick || i.refObjId === pick));
     if (!elixir) return null;
     const degree = this.degree(item), powder = cfg.powder && degree > 0 ? World.items().find(i => this.powderDegree(i) === degree) : null;
     const luck = !!cfg.use?.luck;
@@ -17445,7 +17448,8 @@ const Alchemy = {
     if (rows.some(r => r.slot === item.slot && r.refObjId === item.refObjId)) return UI.toast('That item is already in the queue.', 'warn');
     if (rows.length >= 40) return UI.toast('The queue holds at most 40 items.', 'warn');
     // A new row starts from the goals last used (the single-item settings), then is edited on its own.
-    rows.push({ refObjId: item.refObjId, slot: item.slot, goals: alchemyGoals(this.cfg()) });
+    const goals = alchemyGoals(this.cfg()); goals.elixir = this.elixirChoice(this.kind(item), goals);
+    rows.push({ refObjId: item.refObjId, slot: item.slot, goals });
     this.rowStatus.set(rows.at(-1), 'Waiting'); this.editRow = rows.length - 1; Settings.saveProfile();
     if (!this.queue && !this.run) this.message = 'Item added. Set its goals below, then press Start queue.';
   },
@@ -17626,7 +17630,7 @@ const Alchemy = {
       };
       goals.append(UI.number('Target + (0 = leave the plus)', () => g().target, n => g().target = n, 0, 250),
         UI.number('Maximum attempts', () => g().limit, n => g().limit = n, 1, ALCHEMY_MAX_ATTEMPTS),
-        UI.select('Elixir', elixirs, () => g().elixir, value => g().elixir = Number(value)),
+        UI.select('Elixir', elixirs, () => this.elixirChoice(this.kind(this.editing().item) || 'weapon', g()), value => g().elixir = Number(value)),
         UI.check('Use lucky powder of matching degree', () => g().powder, value => g().powder = value),
         UI.number('Lucky powder from +', () => g().from.powder, n => g().from.powder = n, 0, 250));
       for (const [kind, st] of Object.entries(STONES)) goals.append(UI.check('Use ' + st.label + ' stones while enhancing', () => g().use[kind], v => g().use[kind] = v),
@@ -17784,8 +17788,8 @@ const AlchemyBuy = {
       const degree = Alchemy.degree(item), kind = Alchemy.kind(item);
       if (!degree) continue;
       if (Alchemy.stepWanted('plus', item, g)) {
-        const elixirs = (ALCHEMY_DATA.kinds[kind] || []).slice().sort((a, b) => (b === g.elixir) - (a === g.elixir));
-        if (!g.elixir || elixirs.includes(g.elixir)) add('elixir:' + kind, `${kind} elixir`, g.elixir ? [g.elixir] : elixirs, 'elixir');
+        const pick = Alchemy.elixirChoice(kind, g), elixirs = ALCHEMY_DATA.kinds[kind] || [];
+        if (elixirs.length) add('elixir:' + kind + ':' + pick, `${kind} elixir`, pick ? [pick] : elixirs, 'elixir');
         if (g.powder) add('powder:' + degree, `lucky powder (degree ${degree})`, [3682 + degree, 3694 + degree], 'powder');
         const helpers = Object.keys(STONES).filter(k => g.use?.[k]);
         // Each Astral charge needs an Immortal one first, so Astral also asks for Immortal stones.

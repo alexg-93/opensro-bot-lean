@@ -8214,6 +8214,24 @@ test('alchemy buying: the gold to keep is never spent, and what the merchant doe
   const poor = buyFixture({ gold: '1000000' }); poor.Alchemy.startQueue();
   assert.equal(poor.AlchemyBuy.run, null); assert.ok(poor.Alchemy.log.some(l => /Not buying: Not enough gold/.test(l.text)));
 });
+test('a shield in the queue uses and buys shield elixirs, even when the last goals named a weapon elixir', () => {
+  // Live: a shield row copied the weapon elixir picked earlier, so no shield elixir was bought or used.
+  const SHIELD_ELIXIR = { refObjId: 3680, name: 'Elixir (shield)', tab: 0, slot: 2, price: '1000000', maxStack: 50, typeFlags: 0x0d6c };
+  const f = buyFixture({ offers: [BUY_ELIXIR, SHIELD_ELIXIR] }), cfg = f.Settings.profile.alchemy;
+  f.World.gp.inventory.push({ slot: 25, refObjId: 102, typeFlags: 44 | (4 << 7) | (1 << 11), plus: 0, durability: 100, variance: '0', magic: [], quantity: 1, name: 'Test shield', tooltip: { fields: { itemClass: 25 } } });
+  cfg.queue.length = 0; cfg.elixir = 3679; f.Alchemy.addRow(25);
+  assert.equal(f.Alchemy.kind(f.World.items().find(i => i.slot === 25)), 'shield');
+  assert.equal(cfg.queue[0].goals.elixir, 0, 'a weapon elixir is not kept on a shield');
+  cfg.queue[0].goals.elixir = 3679; cfg.queue[0].goals.target = 1;
+  const list = f.AlchemyBuy.shortfall(cfg.queue);
+  assert.deepEqual(JSON.parse(JSON.stringify(list.map(n => [n.label, n.refs]))), [['shield elixir', [3676, 3680]]], 'an old saved weapon elixir still buys shield ones');
+  f.Alchemy.startQueue();
+  for (let i = 0; i < 30 && f.AlchemyBuy.run; i++) f.step();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.stats.buys.map(b => b.slot))), [2], 'the shield elixir offer');
+  for (let i = 0; i < 10 && !(f.sentLater || []).some(c => c.mode === 'reinforce'); i++) f.step();
+  const sent = (f.sentLater || []).find(c => c.mode === 'reinforce');
+  assert.ok(sent, 'the shield is enhanced'); assert.equal(f.World.items().find(i => i.slot === sent.slots[1]).refObjId, 3680);
+});
 test('alchemy buying: stones that keep running out are bought again until the queue gold limit', () => {
   // Live 1.2.283: a 20 million limit per visit bought 10 Int stones; when they ran out the item was skipped after one
   // more visit, so the other blues were never bought. Now every run-out buys again while a visit still buys something.

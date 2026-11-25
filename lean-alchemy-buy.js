@@ -24,8 +24,8 @@ const AlchemyBuy = {
       const degree = Alchemy.degree(item), kind = Alchemy.kind(item);
       if (!degree) continue;
       if (Alchemy.stepWanted('plus', item, g)) {
-        const elixirs = (ALCHEMY_DATA.kinds[kind] || []).slice().sort((a, b) => (b === g.elixir) - (a === g.elixir));
-        if (!g.elixir || elixirs.includes(g.elixir)) add('elixir:' + kind, `${kind} elixir`, g.elixir ? [g.elixir] : elixirs, 'elixir');
+        const pick = Alchemy.elixirChoice(kind, g), elixirs = ALCHEMY_DATA.kinds[kind] || [];
+        if (elixirs.length) add('elixir:' + kind + ':' + pick, `${kind} elixir`, pick ? [pick] : elixirs, 'elixir');
         if (g.powder) add('powder:' + degree, `lucky powder (degree ${degree})`, [3682 + degree, 3694 + degree], 'powder');
         const helpers = Object.keys(STONES).filter(k => g.use?.[k]);
         // Each Astral charge needs an Immortal one first, so Astral also asks for Immortal stones.
