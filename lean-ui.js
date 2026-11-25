@@ -891,9 +891,11 @@ const UI = {
       this.speedNote = el('p', '', 'muted');
       pots.append(this.check('Use beginner +100% speed scroll automatically', () => P().speedScroll, v => { P().speedScroll = v; SpeedScroll.reset(); }),
         el('p', 'Uses only the beginner scroll during hunting or travel when no movement-speed buff is active. Works during combat casts; potions have priority. Waits for buff confirmation and stops retrying after three unconfirmed attempts.', 'muted'), this.speedNote);
-      pots.append(this.check('Keep a 20% damage scroll active', () => Settings.profile.scroll.damageInc, v => { Settings.profile.scroll.damageInc = v; ScrollBuff.reset(); }),
-        this.check('Keep a 20% resistance scroll active', () => Settings.profile.scroll.damageAbs, v => { Settings.profile.scroll.damageAbs = v; ScrollBuff.reset(); }),
-        el('p', 'While hunting, uses a 20% damage increase and/or resistance scroll from your bag whenever its 30-minute buff runs out, like the speed scroll above: potions have priority, each use waits for its buff, and it stops retrying after three unconfirmed attempts. Buying more scrolls is set under Item mall below.', 'muted'));
+      const keep = (k, label) => this.check(label, () => Settings.profile.scroll[k], v => { Settings.profile.scroll[k] = v; ScrollBuff.reset(); });
+      pots.append(keep('damageInc', 'Keep a damage increase scroll active'), keep('damageAbs', 'Keep a damage absorption scroll active'),
+        keep('hpUp', 'Keep an HP increase scroll active'), keep('mpUp', 'Keep an MP increase scroll active'),
+        keep('hit', 'Keep a hit scroll active'), keep('dodge', 'Keep a dodging scroll active'),
+        el('p', 'While hunting, uses a matching scroll from your bag whenever its buff runs out: the 2-minute Damage Increase, Damage Absorption, HP 1000 and MP 1000 scrolls first, then the Item mall 20% scrolls and the 500 HP/MP scrolls. Like the speed scroll above: potions have priority, each use waits for its buff, and a scroll that is not confirmed after three attempts is set aside while the others keep going. Buying Item mall scrolls is set under Item mall below.', 'muted'));
       const R = () => P().repairHammer;
       this.hammerNote = el('p', '', 'muted');
       pots.append(this.check('Use a repair hammer when gear is worn', () => R().on, v => { R().on = v; RepairHammer.reset(); }),

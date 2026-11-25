@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nixxane bot
 // @namespace    https://opensro.online/
-// @version      1.2.285
+// @version      1.2.286
 // @updateURL    https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.meta.js
 // @downloadURL  https://raw.githubusercontent.com/nixxane/opensro-bot-lean/main/bot.lean.user.js
 // @description  Combat, reliable looting, potions, restocking and walk-back in one compact panel.
@@ -22,7 +22,7 @@ if (W.__SRO_ASISTAN__ || W.__SRO_LEAN__) {
   console.warn('[NIX] Another SRO assistant is active. Disable it and reload to use NIX.');
   return;
 }
-const VERSION = '1.2.285';
+const VERSION = '1.2.286';
 const APP = { version: VERSION };
 Object.defineProperty(W, '__SRO_LEAN__', { value: APP });
 Object.defineProperty(W, '__SRO_ASISTAN__', { value: APP });
@@ -216,7 +216,7 @@ const DEFAULT_PROFILE = {
   mastery: { enabled: false, ids: [], gap: 0, skills: false, scope: 'rotation', reserve: 0, order: 'masteries', max: false },
   lure: { enabled: false, points: [], taunt: { id: 0, group: 0 }, area: { id: 0, group: 0 }, holdS: 10, pauseEveryM: 10, pauseS: 4, radius: 15, returnHpPct: 50, stopAt: 0, stopOnPlayers: 0, stopAfter: 0 },
   pet: { attack: { on: false, recall: true, radius: 15, timeout: 3, resend: 5 } },
-  scroll: { damageInc: false, damageAbs: false },
+  scroll: { damageInc: false, damageAbs: false, hpUp: false, mpUp: false, hit: false, dodge: false },
   mall: { on: false, budgetSilk: 0, hp: { on: false, low: 10, target: 1000 }, mp: { on: false, low: 10, target: 1000 }, damageInc: { on: false, low: 5, target: 20 }, damageAbs: { on: false, low: 5, target: 20 }, reverse: { on: false, low: 1, target: 5 } },
   party: { autoAcceptMatching: false, autoRecruit: false, joinMain: false, mainName: '', leaveIfNotLeader: false, onlyWhileRunning: false, acceptNames: '', autoInvite: false, inviteNames: '', inviteAnyone: false, inviteRadius: 300, autoRes: false, acceptRes: false, acceptBeast: true, resTownCheck: true, reviveWaitS: 20, resRadius: 300, title: 'Hunting party', min: 1, max: 90, purpose: 0, expShare: true, itemShare: true,
     support: { enabled: false, whileStopped: false, range: 30, heal: { id: 0, group: 0, pct: 60, self: false }, group: { id: 0, group: 0, pct: 60, count: 2 },
@@ -7385,18 +7385,28 @@ const RepairHammer = {
 };
 
 
-// Keep the Item Mall's 20% battle scrolls active while the bot works: item 3767 -> skill 3109 (damage increase),
-// item 3768 -> skill 3110 (damage resistance) — both 30 minutes. Only bag stock is used here; buying more is the
-// Item Mall buyer's business. Like the speed scroll: never infer consumption from a local dispatch, one request at
-// a time, and the same blocked-while-travelling guards.
+// Keep buff scrolls from the bag active while the bot works. Each kind lists the live items that give that buff,
+// best first; the kind counts as active while any of their buffs shows (the same effect from two scrolls is never
+// stacked on purpose). Items -> skills from the live world references (2026-11):
+//   20% damage increase:  23275 GNGWC Damage Increase Scroll -> 30537 (2 min), 3767 Item Mall 20% -> 3109 (30 min)
+//   20% damage absorption: 23276 GNGWC Damage Absorption Scroll -> 30538 (2 min), 3768 Item Mall 20% -> 3110 (30 min)
+//   HP increase: 23277 HP 1000 -> 30539 (2 min), 6102 500 HP -> 3968 (30 min); MP the same: 23278 -> 30540, 6103 -> 3969
+//   Hit 6099 -> 3965, Dodging 6098 -> 3964 (60 min)
+// The GNGWC scrolls carry their own 2-minute item cooldown (group 0: per item), so they never block each other.
+// Only bag stock is used here; buying more is the Item Mall buyer's business. Like the speed scroll: never infer
+// consumption from a local dispatch, one request at a time, and the same blocked-while-travelling guards.
 const ScrollBuff = {
-  pending: null, attempts: 0, nextAt: 0, message: 'Battle scrolls off.',
+  pending: null, attempts: {}, nextAt: {}, message: 'Battle scrolls off.',
   kinds: {
-    damageInc: { item: 3767, skill: 3109, label: '20% damage increase' },
-    damageAbs: { item: 3768, skill: 3110, label: '20% damage resistance' },
+    damageInc: { label: 'damage increase', uses: [{ item: 23275, skill: 30537 }, { item: 3767, skill: 3109 }] },
+    damageAbs: { label: 'damage absorption', uses: [{ item: 23276, skill: 30538 }, { item: 3768, skill: 3110 }] },
+    hpUp: { label: 'HP increase', uses: [{ item: 23277, skill: 30539 }, { item: 6102, skill: 3968 }] },
+    mpUp: { label: 'MP increase', uses: [{ item: 23278, skill: 30540 }, { item: 6103, skill: 3969 }] },
+    hit: { label: 'hit', uses: [{ item: 6099, skill: 3965 }] },
+    dodge: { label: 'dodging', uses: [{ item: 6098, skill: 3964 }] },
   },
-  reset() { this.pending = null; this.attempts = 0; this.nextAt = 0; this.message = 'Waiting for automation.'; },
-  active(k) { return World.buffRemaining(this.kinds[k].skill) > 0; },
+  reset() { this.pending = null; this.attempts = {}; this.nextAt = {}; this.message = 'Waiting for automation.'; },
+  active(k) { return this.kinds[k].uses.some(u => World.buffRemaining(u.skill) > 0); },
   enabled() { const c = Settings.profile.scroll; return Object.keys(this.kinds).filter(k => c[k]); },
   tick() {
     const wanted = this.enabled();
@@ -7404,7 +7414,7 @@ const ScrollBuff = {
     if (!World.inWorld() || World.isDead()) { this.message = 'Waiting for a living character in the world.'; return false; }
     if (!Hunt.running) { this.message = 'Start the bot to keep the scrolls active.'; return false; }
     const missing = wanted.filter(k => !this.active(k));
-    if (!missing.length) { this.pending = null; this.attempts = 0; this.message = 'Battle scrolls active.'; return false; }
+    if (!missing.length) { this.pending = null; this.attempts = {}; this.message = 'Battle scrolls active.'; return false; }
     if (Town.trip) { this.message = 'Waiting for town services to finish.'; return false; }
     const blocked = World.gp.inventoryPending ? 'Waiting for the inventory transaction to finish.' :
       World.gp.returnScroll ? 'Waiting for return-scroll travel.' :
@@ -7415,25 +7425,30 @@ const ScrollBuff = {
     if (blocked) { this.message = blocked; return false; }
     if (this.pending) {
       // Only the kind that was sent owns this window: another scroll may still be missing.
-      if (this.active(this.pending.kind)) { this.pending = null; this.attempts = 0; }
+      const k = this.pending.kind;
+      if (this.active(k)) { this.pending = null; this.attempts[k] = 0; }
       else if (now() - this.pending.at < 8000) { this.message = 'Waiting for the scroll buff.'; return false; }
       else {
-        this.pending = null; this.nextAt = now() + 30000 * this.attempts;
-        this.message = 'The scroll buff was not confirmed. Backing off before retrying.';
+        this.pending = null; this.nextAt[k] = now() + 30000 * (this.attempts[k] || 1);
+        this.message = 'The ' + this.kinds[k].label + ' scroll buff was not confirmed. Backing off before retrying.';
         Log.warn(this.message);
       }
     }
-    if (this.attempts >= 3) { this.message = 'Battle scroll not confirmed after 3 attempts. Check the game and toggle the option to retry.'; return false; }
-    if (now() < this.nextAt) return false;
+    let note = '';
     for (const k of missing) {
       const def = this.kinds[k];
-      const item = World.items().find(i => i.refObjId === def.item && (i.quantity ?? 1) > 0);
-      if (!item) { this.message = 'No ' + def.label + ' scroll in your bag.'; continue; }
+      // A scroll that never confirms is set aside; the other kinds keep going.
+      if ((this.attempts[k] || 0) >= 3) { note ||= 'The ' + def.label + ' scroll was not confirmed after 3 attempts. Check the game and toggle the option to retry.'; continue; }
+      if (now() < (this.nextAt[k] || 0)) continue;
+      let item = null;
+      for (const u of def.uses) { item = World.items().find(i => i.refObjId === u.item && (i.quantity ?? 1) > 0); if (item) break; }
+      if (!item) { note ||= 'No ' + def.label + ' scroll in your bag.'; continue; }
       if (!Cmd.itemUse(item.slot)) { this.message = 'Waiting for item-use availability (potions have priority).'; return false; }
-      this.attempts++; this.pending = { kind: k, at: now() };
-      this.message = def.label + ' scroll requested; waiting for its buff.';
+      this.attempts[k] = (this.attempts[k] || 0) + 1; this.pending = { kind: k, at: now() };
+      this.message = 'The ' + def.label + ' scroll requested; waiting for its buff.';
       return true;
     }
+    if (note) this.message = note;
     return false;
   },
 };
@@ -17920,7 +17935,7 @@ const AlchemyBuy = {
 const ALCHEMY_MERCHANT = { name: /alchemy/i, refObjId: 0, regionId: 0, x: 0, y: 0, z: 0 };
 
 
-const RELEASE_NOTES = [{"version": "1.2.285", "title": "Alchemy buying keeps going until the stones are done", "items": ["Fixed: when the bought stones ran out, the queue went back to the merchant only once per item, so the other stones (Str after Int, say) were never bought and the item was skipped.", "Now it goes back every time an item runs out, as long as the last visit bought something.", "The gold limit is now for the whole queue run, not per visit: \"Spend at most this much gold per queue run\". New default: 100.000.000. A limit you already set stays as it is, so raise it if you want more stones per run.", "When the limit is used up, the log says so, and the item is skipped or the queue stops, as you set."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.284", "title": "No more reload after an unconfirmed alchemy attempt", "items": ["Fixed: after an alchemy attempt the bot could not confirm, it said \"Previous attempt is unconfirmed\" on every start until you reloaded the page.", "Now, a few seconds after such an attempt, once the game is quiet, the bot checks the bag. If its elixir or stone was used, the log says so and asks you to check the item; if nothing was used, it says the attempt was not carried out. Either way you can start again without a reload.", "The bot still never sends an attempt again by itself."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.283", "title": "Gold amounts with dots", "items": ["Gold fields now show dots between thousands, like 100.000.000, so big amounts are easy to read.", "You can type them with dots, commas or spaces, or short: 500k, 20m (or 20kk), 1.5b.", "Used for the alchemy buying limits, the leveling gold to keep and stall prices. The alchemy log shows gold the same way."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.282", "title": "Alchemy queue buys its own elixirs and stones", "items": ["New in the Alchemy tab: \"Buy what the queue needs\". Off by default, because it spends gold.", "With it on, the queue first visits \"OpenSRO Alchemy\" in Jangan and buys what the queued items need at their degree: elixirs, lucky powder, Luck/Steady/Immortal/Astral, white and blue stones.", "You set how many of each to have in the bag, the most gold one visit may spend (20 million by default) and the gold it always keeps (1 million by default).", "When an item runs out on the way, the queue goes to the merchant once more before skipping that item.", "Only what the merchant sells is bought. Every purchase is confirmed by the bag; one that is not confirmed is never sent again.", "Start the queue in Jangan. The bot remembers where it saw the merchant, so later it walks there from anywhere in town."], "note": "Tested in simulation only. This is the first version that buys from that merchant; try it with a small gold limit first."}, {"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.278", "title": "A full bag now says why the town trip stops", "items": ["When the character bag is nearly full and nothing in it can be sold or stored, the trip now warns you on arrival in town. It still sells the pet's loot, then stops before walking back, as before.", "The stop message now explains why: selling pet loot does not free bag space, because the loot only passes through one bag slot. It also tells you what to change: turn on \"Sell ordinary gear from the character bag too\", add Sell or Store item rules, or clear some bag space.", "With bag selling already on, it reminds you that only ordinary Chinese / European gear sells from the bag without a Sell rule."], "note": "Only the messages changed; the trip itself works as before. Tested with the integration suite in simulation, not in a live game."}];
+const RELEASE_NOTES = [{"version": "1.2.286", "title": "new buff scrolls: damage, absorption, HP and MP", "items": ["Supplies: keeps the new 2-minute Damage Increase, Damage Absorption, HP 1000 and MP 1000 scrolls active while hunting", "Also uses the 500 HP / 500 MP, Hit and Dodging scrolls, each with its own switch", "The damage and absorption switches use the new scrolls first, then the Item mall 20% ones", "A scroll that never confirms is set aside on its own; the other scrolls keep going"], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.285", "title": "Alchemy buying keeps going until the stones are done", "items": ["Fixed: when the bought stones ran out, the queue went back to the merchant only once per item, so the other stones (Str after Int, say) were never bought and the item was skipped.", "Now it goes back every time an item runs out, as long as the last visit bought something.", "The gold limit is now for the whole queue run, not per visit: \"Spend at most this much gold per queue run\". New default: 100.000.000. A limit you already set stays as it is, so raise it if you want more stones per run.", "When the limit is used up, the log says so, and the item is skipped or the queue stops, as you set."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.284", "title": "No more reload after an unconfirmed alchemy attempt", "items": ["Fixed: after an alchemy attempt the bot could not confirm, it said \"Previous attempt is unconfirmed\" on every start until you reloaded the page.", "Now, a few seconds after such an attempt, once the game is quiet, the bot checks the bag. If its elixir or stone was used, the log says so and asks you to check the item; if nothing was used, it says the attempt was not carried out. Either way you can start again without a reload.", "The bot still never sends an attempt again by itself."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.283", "title": "Gold amounts with dots", "items": ["Gold fields now show dots between thousands, like 100.000.000, so big amounts are easy to read.", "You can type them with dots, commas or spaces, or short: 500k, 20m (or 20kk), 1.5b.", "Used for the alchemy buying limits, the leveling gold to keep and stall prices. The alchemy log shows gold the same way."], "note": "Tested in simulation, not in a live game."}, {"version": "1.2.282", "title": "Alchemy queue buys its own elixirs and stones", "items": ["New in the Alchemy tab: \"Buy what the queue needs\". Off by default, because it spends gold.", "With it on, the queue first visits \"OpenSRO Alchemy\" in Jangan and buys what the queued items need at their degree: elixirs, lucky powder, Luck/Steady/Immortal/Astral, white and blue stones.", "You set how many of each to have in the bag, the most gold one visit may spend (20 million by default) and the gold it always keeps (1 million by default).", "When an item runs out on the way, the queue goes to the merchant once more before skipping that item.", "Only what the merchant sells is bought. Every purchase is confirmed by the bag; one that is not confirmed is never sent again.", "Start the queue in Jangan. The bot remembers where it saw the merchant, so later it walks there from anywhere in town."], "note": "Tested in simulation only. This is the first version that buys from that merchant; try it with a small gold limit first."}, {"version": "1.2.281", "title": "Alchemy queue: full item names", "items": ["The queue lines leave more room for the item name and its plus goal, so they are no longer cut off in the small window.", "After you add an item, the tab says to set its goals and press Start queue, instead of still asking you to add one."], "note": "Tested with the integration suite in simulation, not in a live game."}, {"version": "1.2.280", "title": "Alchemy queue and blue stones", "items": ["The Alchemy tab now has a queue. Add several items from your bag; the bot finishes one item, then starts the next.", "Each item goes Plus, then White, then Blue. Blues come last because a white stone that works can roll a blue again.", "Every item has its own goals, in three tabs: Plus (target +, elixir, powder, Luck/Steady/Immortal/Astral), Attribute (white stat %) and Blue.", "New: blue stones. Pick a goal per blue: add it, a value or more, or max. Only blues the item can take are shown, with the stones you have.", "The tab shows free magic slots. Luck, Steady, Immortal and Astral use the same slots, so a blue that does not fit is passed over.", "Out of materials: the queue goes to the next item, or stops if you untick that.", "New settings: delay between attempts, and a sound when the queue is done.", "Queued items are kept in the bag on town trips, like the selected alchemy item was."], "note": "Tested with the integration and browser suites in simulation, not in a live game. Blue stone results on the live server are not checked yet."}, {"version": "1.2.279", "title": "Beast-form resurrection is accepted, and never leaves you dead", "items": ["With \"Accept resurrection from party members\" on, the bot now also answers Yes to a party member's beast-form resurrection (\"Someone is trying to resurrect you in a beast form\"). Before, it ignored that question.", "New switch under it: \"Also accept beast-form resurrection\", on by default. Beast form means weaker basic attacks, more defence and much less HP and MP. Turn it off to answer that question yourself.", "Fixed: while an unanswered beast-form question was open, the bot also never revived itself, so the character stayed dead. Now an offer the bot leaves alone no longer holds back its own revive. With \"Accept resurrection\" off, open offers are still left for you to answer, as before."], "note": "Tested with the integration suite in simulation, not in a live game."}];
 
 // Check trusted repository metadata; never execute downloaded update code.
 const Updates = {
@@ -20549,9 +20564,11 @@ const UI = {
       this.speedNote = el('p', '', 'muted');
       pots.append(this.check('Use beginner +100% speed scroll automatically', () => P().speedScroll, v => { P().speedScroll = v; SpeedScroll.reset(); }),
         el('p', 'Uses only the beginner scroll during hunting or travel when no movement-speed buff is active. Works during combat casts; potions have priority. Waits for buff confirmation and stops retrying after three unconfirmed attempts.', 'muted'), this.speedNote);
-      pots.append(this.check('Keep a 20% damage scroll active', () => Settings.profile.scroll.damageInc, v => { Settings.profile.scroll.damageInc = v; ScrollBuff.reset(); }),
-        this.check('Keep a 20% resistance scroll active', () => Settings.profile.scroll.damageAbs, v => { Settings.profile.scroll.damageAbs = v; ScrollBuff.reset(); }),
-        el('p', 'While hunting, uses a 20% damage increase and/or resistance scroll from your bag whenever its 30-minute buff runs out, like the speed scroll above: potions have priority, each use waits for its buff, and it stops retrying after three unconfirmed attempts. Buying more scrolls is set under Item mall below.', 'muted'));
+      const keep = (k, label) => this.check(label, () => Settings.profile.scroll[k], v => { Settings.profile.scroll[k] = v; ScrollBuff.reset(); });
+      pots.append(keep('damageInc', 'Keep a damage increase scroll active'), keep('damageAbs', 'Keep a damage absorption scroll active'),
+        keep('hpUp', 'Keep an HP increase scroll active'), keep('mpUp', 'Keep an MP increase scroll active'),
+        keep('hit', 'Keep a hit scroll active'), keep('dodge', 'Keep a dodging scroll active'),
+        el('p', 'While hunting, uses a matching scroll from your bag whenever its buff runs out: the 2-minute Damage Increase, Damage Absorption, HP 1000 and MP 1000 scrolls first, then the Item mall 20% scrolls and the 500 HP/MP scrolls. Like the speed scroll above: potions have priority, each use waits for its buff, and a scroll that is not confirmed after three attempts is set aside while the others keep going. Buying Item mall scrolls is set under Item mall below.', 'muted'));
       const R = () => P().repairHammer;
       this.hammerNote = el('p', '', 'muted');
       pots.append(this.check('Use a repair hammer when gear is worn', () => R().on, v => { R().on = v; RepairHammer.reset(); }),

@@ -4694,6 +4694,31 @@ test('battle scrolls are re-used only when their buff runs out', () => {
   f.ScrollBuff.tick();
   assert.match(f.ScrollBuff.message, /off/);
 });
+test('new live buff scrolls: the 2-minute scrolls come first and one stuck kind does not stop the others', () => {
+  const f = fixture();
+  Object.assign(f.Settings.profile.scroll, { damageAbs: true, hpUp: true });
+  f.World.applyGameplay({ ...f.World.gp, inventory: [
+    { slot: 13, refObjId: 3768, typeFlags: 3820, quantity: 5, name: '20% damage resistance scroll' },
+    { slot: 14, refObjId: 23276, typeFlags: 3820, quantity: 1, name: 'Damage Absorption Scroll' },
+    { slot: 15, refObjId: 23277, typeFlags: 3820, quantity: 1, name: 'HP 1000 Increase Scroll' }] });
+  f.Hunt.start();
+  const uses = () => f.commands.filter(c => c.kind === 'item-use').map(c => c.slot);
+  f.ScrollBuff.tick();
+  assert.deepEqual(uses(), [14], 'the Damage Absorption Scroll is used before the Item mall one');
+  f.advance(500);
+  f.World.applyGameplay({ ...f.World.gp, attachedEffects: [{ gid: 1, skill: 30538 }] });
+  f.ScrollBuff.tick();
+  assert.deepEqual(uses(), [14, 15], 'then the HP 1000 scroll');
+  for (let i = 0; i < 6; i++) { f.advance(100000); f.ScrollBuff.tick(); }
+  assert.match(f.ScrollBuff.message, /HP increase scroll was not confirmed after 3 attempts/);
+  const before = uses().length;
+  f.World.applyGameplay({ ...f.World.gp, attachedEffects: [] });
+  f.ScrollBuff.tick();
+  assert.deepEqual(uses().slice(before), [14], 'absorption keeps going while HP is set aside');
+  f.World.applyGameplay({ ...f.World.gp, attachedEffects: [{ gid: 1, skill: 3110 }] });
+  f.ScrollBuff.tick();
+  assert.equal(f.ScrollBuff.active('damageAbs'), true, 'the Item mall buff counts for the same kind');
+});
 test('reverse return scrolls have one switch: the Item mall one; an old merchant switch carries over', () => {
   const f = fixture();
   f.Settings.profile.potion.restock.reverse.on = true;
