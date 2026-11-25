@@ -112,7 +112,7 @@ const Live = {
       hp: Math.round(vitals.hpPct), mp: Math.round(vitals.mpPct),
       hpNow: Math.round(vitals.hp), hpMax: Math.round(vitals.maxHp), mpNow: Math.round(vitals.mp), mpMax: Math.round(vitals.maxMp),
       inWorld: World.inWorld(), dead: World.isDead(), running: !!Hunt.running, state: String(Hunt.state || ''),
-      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start and stop it.
+      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start, stop and reload it.
       active: botActive(), control: Settings.profile.live.control === true,
       note: String(Reconnect.message || '').slice(0, 120),
       pos: pose ? { region: pose.regionId, x: Math.round(pose.x), z: Math.round(pose.z) } : null,
@@ -224,10 +224,17 @@ const Live = {
       this.sending = false;
     }
   },
-  // A Start or Stop from the dashboard, only when the player allowed it for this character. It does what the panel's buttons
-  // do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because it toggles.
+  // A Start, Stop or Reload from the dashboard, only when the player allowed it for this character. It does what the panel's
+  // buttons do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because
+  // it toggles. Reload is for a game server restart the page did not recover from: the same reload as after a failed load,
+  // which brings the character back in and resumes hunting if it was hunting.
   command(cmd) {
-    if (Settings.profile.live.control !== true || (cmd !== 'start' && cmd !== 'stop')) return false;
+    if (Settings.profile.live.control !== true || !['start', 'stop', 'reload'].includes(cmd)) return false;
+    if (cmd === 'reload') {
+      Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
+      if (!Reconnect.reloadPage('dashboard')) Reconnect.doReload(); // also after the automatic reloads gave up: the player asked for this one
+      return true;
+    }
     if (cmd === 'stop') userStop();
     else if (botActive()) return false;
     else { toggleBot(); if (!Hunt.running) return false; }

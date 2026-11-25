@@ -266,7 +266,7 @@ const DEFAULT_PROFILE = {
   // Discord session reports (lean-reporter.js). The webhook URL is a secret and lives in Store, never here.
   sessionReport: { on: false, minutes: 3 },
   // Live dashboard (lean-live.js). The hub address and code are a secret and live in Store, never here.
-  // control: the dashboard may start and stop this character (off unless the player turns it on).
+  // control: the dashboard may start, stop and reload this character (off unless the player turns it on).
   live: { on: false, seconds: 10, control: false },
 };
 // The goals of one alchemy queue row: the single-item fields of DEFAULT_PROFILE.alchemy (target +, stones, white and blue
@@ -13949,11 +13949,11 @@ const Reconnect = {
     this.attempts = 1; this.nextAt = now() + 3000; this.backAt = 0;
     // The message reaches uploaded diagnostics, so it never carries the character's name.
     this.message = 'The page was reloaded; restoring your character.';
-    Log.warn('The game failed to load earlier; page reloaded, restoring ' + p.character + '.');
+    Log.warn(p.why === 'dashboard' ? 'Page reloaded from the live dashboard; restoring ' + p.character + '.' : 'The game failed to load earlier; page reloaded, restoring ' + p.character + '.');
   },
   // Save what to resume, then reload. Shared by a failed load and an expired session; the wait before it grows with
   // every reload in a row (reloadWait), and reloading stops after 12 hours without getting back into the game.
-  reloadPage() {
+  reloadPage(why) {
     const data = this.load(), streak = this.reloadStreak();
     if (streak && Date.now() - streak.first > this.GIVE_UP_MS) {
       if (!this.gaveUp) {
@@ -13964,7 +13964,7 @@ const Reconnect = {
     }
     const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.SNAP_MS ? data.snap : null;
     this.save({ snap: data.snap, reloads: { count: (streak?.count || 0) + 1, first: streak?.first || Date.now(), last: Date.now() },
-      pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now() } : null });
+      pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now(), ...(why ? { why } : {}) } : null });
     this.doReload();
     return true;
   },
@@ -18737,7 +18737,7 @@ const Live = {
       hp: Math.round(vitals.hpPct), mp: Math.round(vitals.mpPct),
       hpNow: Math.round(vitals.hp), hpMax: Math.round(vitals.maxHp), mpNow: Math.round(vitals.mp), mpMax: Math.round(vitals.maxMp),
       inWorld: World.inWorld(), dead: World.isDead(), running: !!Hunt.running, state: String(Hunt.state || ''),
-      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start and stop it.
+      // active: Start / stop would stop something (a town trip or walk back counts); control: the dashboard may start, stop and reload it.
       active: botActive(), control: Settings.profile.live.control === true,
       note: String(Reconnect.message || '').slice(0, 120),
       pos: pose ? { region: pose.regionId, x: Math.round(pose.x), z: Math.round(pose.z) } : null,
@@ -18849,10 +18849,17 @@ const Live = {
       this.sending = false;
     }
   },
-  // A Start or Stop from the dashboard, only when the player allowed it for this character. It does what the panel's buttons
-  // do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because it toggles.
+  // A Start, Stop or Reload from the dashboard, only when the player allowed it for this character. It does what the panel's
+  // buttons do: Stop is Stop all (it also cancels auto-start), Start is Start / stop, pressed only while nothing runs, because
+  // it toggles. Reload is for a game server restart the page did not recover from: the same reload as after a failed load,
+  // which brings the character back in and resumes hunting if it was hunting.
   command(cmd) {
-    if (Settings.profile.live.control !== true || (cmd !== 'start' && cmd !== 'stop')) return false;
+    if (Settings.profile.live.control !== true || !['start', 'stop', 'reload'].includes(cmd)) return false;
+    if (cmd === 'reload') {
+      Activity.emit({ category: 'session', code: 'dashboard-reload', level: 'info', text: 'Reloading the page from the live dashboard.' });
+      if (!Reconnect.reloadPage('dashboard')) Reconnect.doReload(); // also after the automatic reloads gave up: the player asked for this one
+      return true;
+    }
     if (cmd === 'stop') userStop();
     else if (botActive()) return false;
     else { toggleBot(); if (!Hunt.running) return false; }
@@ -21082,12 +21089,12 @@ const UI = {
       this.liveSetupHelp(),
       this.check('Send live stats to my hub', () => Settings.profile.live.on, v => { Settings.profile.live.on = v; Live.tick(); }),
       this.number('Send every (seconds)', () => Settings.profile.live.seconds, v => Settings.profile.live.seconds = v, 3, 60),
-      this.check('Allow Start and Stop from the dashboard', () => Settings.profile.live.control, v => { Settings.profile.live.control = v; }),
+      this.check('Allow Start, Stop and Reload from the dashboard', () => Settings.profile.live.control, v => { Settings.profile.live.control = v; }),
       this.field('Pair link or hub address', address),
       this.field('Hub code', code),
       this.button('Send a test report', () => { void Live.send(true).catch(() => {}); }),
       this.liveNote,
-      el('p', 'Shows this character on a phone dashboard served by your own hub (a Cloudflare Worker on your account, or live/hub.js behind an HTTPS tunnel). The data goes only to that hub. The address and code stay in this browser and are never part of share codes, backups or bug reports. The hub must be reachable over HTTPS. With Start and Stop allowed, anyone who has your dashboard link can start and stop this character.', 'muted')));
+      el('p', 'Shows this character on a phone dashboard served by your own hub (a Cloudflare Worker on your account, or live/hub.js behind an HTTPS tunnel). The data goes only to that hub. The address and code stay in this browser and are never part of share codes, backups or bug reports. The hub must be reachable over HTTPS. With Start, Stop and Reload allowed, anyone who has your dashboard link can start, stop and reload this character.', 'muted')));
   },
   // The pairing request from a #nixlive link. Nothing is saved until Pair is pressed.
   showPairing() {

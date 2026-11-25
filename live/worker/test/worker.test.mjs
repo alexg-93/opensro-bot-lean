@@ -129,7 +129,7 @@ try {
     assert.equal((await command({ cmd: 'stop' }, {})).status, 401);
     assert.equal((await command({ cmd: 'stop' }, { 'X-Code': 'wrong' })).status, 401);
     assert.equal(calls(), 0);
-    for (const bad of [{}, { cmd: 'reload' }, { cmd: 'stop', name: 7 }, { cmd: 'stop', name: '' }, { cmd: 'stop', name: 'x'.repeat(41) }]) assert.equal((await command(bad)).status, 400, JSON.stringify(bad));
+    for (const bad of [{}, { cmd: 'jump' }, { cmd: 'stop', name: 7 }, { cmd: 'stop', name: '' }, { cmd: 'stop', name: 'x'.repeat(41) }]) assert.equal((await command(bad)).status, 400, JSON.stringify(bad));
     assert.equal((await call(env, '/command', { method: 'POST', headers: authed(), body: JSON.stringify({ cmd: 'stop', pad: 'x'.repeat(2000) }) })).status, 413);
     assert.equal((await call(env, '/command', { headers: authed() })).status, 404); // GET is not a command
 
@@ -151,6 +151,8 @@ try {
     assert.equal(answer.headers.get('access-control-allow-origin'), '*', 'the game page must be able to read it');
     assert.deepEqual(await answer.json(), { cmd: 'stop' });
     assert.equal((await post(env, snap({ control: true }))).status, 204, 'handed out once');
+    assert.deepEqual(await (await command({ cmd: 'reload', name: 'Tester' })).json(), { sent: 1 });
+    assert.deepEqual(await (await post(env, snap({ control: true, inWorld: false }))).json(), { cmd: 'reload' }, 'Reload, for a page left on the login screen');
     assert.equal((await post(env, snap({ name: 'Watched' }))).status, 204);
     clock += 91000;
     assert.equal((await post(env, snap({ name: 'Gone', control: true }))).status, 204, 'a command older than 90 s is dropped');

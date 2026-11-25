@@ -10138,7 +10138,7 @@ async function updateTests() {
     assert.equal(f.Live.command('stop'), false, 'not allowed: ignored');
     f.Hunt.running = true; f.Live.command('stop'); assert.equal(f.Hunt.running, true);
     f.Settings.profile.live.control = true;
-    for (const junk of [undefined, '', 'reload', 'STOP', { cmd: 'stop' }]) assert.equal(f.Live.command(junk), false, String(junk));
+    for (const junk of [undefined, '', 'RELOAD', 'STOP', { cmd: 'stop' }]) assert.equal(f.Live.command(junk), false, String(junk));
     assert.equal(f.Hunt.running, true);
     assert.equal(f.Live.command('start'), false, 'already running: a late Start never stops it');
     assert.equal(f.Hunt.running, true);
@@ -10149,6 +10149,23 @@ async function updateTests() {
     assert.equal(f.Hunt.running, true);
     assert.equal(f.Log.lines.filter(e => /from the live dashboard/.test(e.text)).length, 2, 'both land in the log');
     assert.ok(f.Live.snapshot().log.some(e => /Started from the live dashboard/.test(e.text)), 'and on the dashboard feed');
+  });
+
+  test('a Reload from the dashboard reloads the page like a failed load, then brings the character back and resumes hunting', () => {
+    const f = liveFixture(); let reloads = 0;
+    f.Reconnect.doReload = () => { reloads++; };
+    f.World.charName = 'Tester'; f.Hunt.running = true; f.Reconnect.snapshot();
+    assert.equal(f.Live.command('reload'), false, 'not allowed: ignored'); assert.equal(reloads, 0);
+    f.Settings.profile.live.control = true;
+    assert.equal(f.Live.command('reload'), true); assert.equal(reloads, 1);
+    assert.ok(f.Log.lines.some(e => e.text === 'Reloading the page from the live dashboard.'));
+    const pending = JSON.parse(f.storage.get('sro-lean-reload')).pending;
+    assert.deepEqual([pending.character, pending.hunting, pending.why], ['Tester', true, 'dashboard']);
+    f.Reconnect.restore();
+    assert.ok(f.Log.lines.some(e => e.text === 'Page reloaded from the live dashboard; restoring Tester.'));
+    assert.deepEqual([f.Reconnect.intent.character, f.Reconnect.intent.hunting], ['Tester', true]);
+    f.storage.set('sro-lean-reload', JSON.stringify({ reloads: { count: 9, first: 1, last: 2 } }));
+    assert.equal(f.Live.command('reload'), true); assert.equal(reloads, 2, 'the player asked: it reloads even after the automatic reloads gave up');
   });
 
   test('a report answered with a command runs it; a 204 or a broken answer runs nothing', async () => {

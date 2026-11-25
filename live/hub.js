@@ -108,7 +108,7 @@ function handle(req, res) {
       let order;
       try { order = JSON.parse(body); } catch {}
       const name = order?.name;
-      if (!order || !['start', 'stop'].includes(order.cmd) || name !== undefined && (typeof name !== 'string' || !name || name.length > 40)) return res.writeHead(400, CORS).end();
+      if (!order || !['start', 'stop', 'reload'].includes(order.cmd) || name !== undefined && (typeof name !== 'string' || !name || name.length > 40)) return res.writeHead(400, CORS).end();
       // Only characters whose player allowed it (control: true in their last report); no name = all of them reporting now.
       const at = Date.now(), names = [...last.values()].filter(r => r.control === true && (name === undefined ? at - r.at < ONLINE_MS : r.name === name)).map(r => r.name);
       for (const n of names) orders.set(n, { cmd: order.cmd, at });

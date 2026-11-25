@@ -87,11 +87,11 @@ const Reconnect = {
     this.attempts = 1; this.nextAt = now() + 3000; this.backAt = 0;
     // The message reaches uploaded diagnostics, so it never carries the character's name.
     this.message = 'The page was reloaded; restoring your character.';
-    Log.warn('The game failed to load earlier; page reloaded, restoring ' + p.character + '.');
+    Log.warn(p.why === 'dashboard' ? 'Page reloaded from the live dashboard; restoring ' + p.character + '.' : 'The game failed to load earlier; page reloaded, restoring ' + p.character + '.');
   },
   // Save what to resume, then reload. Shared by a failed load and an expired session; the wait before it grows with
   // every reload in a row (reloadWait), and reloading stops after 12 hours without getting back into the game.
-  reloadPage() {
+  reloadPage(why) {
     const data = this.load(), streak = this.reloadStreak();
     if (streak && Date.now() - streak.first > this.GIVE_UP_MS) {
       if (!this.gaveUp) {
@@ -102,7 +102,7 @@ const Reconnect = {
     }
     const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.SNAP_MS ? data.snap : null;
     this.save({ snap: data.snap, reloads: { count: (streak?.count || 0) + 1, first: streak?.first || Date.now(), last: Date.now() },
-      pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now() } : null });
+      pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now(), ...(why ? { why } : {}) } : null });
     this.doReload();
     return true;
   },

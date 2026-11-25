@@ -11,9 +11,9 @@ optional Worker secret LIVE_CODE, when set, wins over the stored code; that is a
 Routes (same contract as live/hub.js, plus /setup):
   OPTIONS *            204 with CORS, answered before any code check (the browser sends no X-Code with a preflight)
   POST /report         X-Code. Body = one snapshot, at most 16 KB. 204, or 200 { cmd } when the dashboard sent that
-                       character a Start or Stop.
+                       character a Start, Stop or Reload.
   GET  /state          X-Code. { now, reports: [latest report per character] }
-  POST /command        X-Code. Body = { cmd: 'start' | 'stop', name? }. Queues the command for that character, or with no
+  POST /command        X-Code. Body = { cmd: 'start' | 'stop' | 'reload', name? }. Queues the command for that character, or with no
                        name for every character reporting now, if its report says control: true. 200 { sent }.
   GET  /pair/<code>    The code is in the path. The "ready" page: pair button, QR code for the phone. 404 on a wrong code.
   GET  /               The dashboard, or the setup page while no code exists.
@@ -151,7 +151,7 @@ async function readReport(request) {
 async function readCommand(request) {
   const read = await readJson(request, MAX_COMMAND_BYTES), order = read.value;
   if (read.status) return read;
-  if (order.cmd !== 'start' && order.cmd !== 'stop') return { status: 400 };
+  if (!['start', 'stop', 'reload'].includes(order.cmd)) return { status: 400 };
   if (order.name !== undefined && (typeof order.name !== 'string' || !order.name || order.name.length > MAX_NAME_LENGTH)) return { status: 400 };
   return { order: { cmd: order.cmd, name: order.name } };
 }

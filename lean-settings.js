@@ -82,7 +82,7 @@ const DEFAULT_PROFILE = {
   // Discord session reports (lean-reporter.js). The webhook URL is a secret and lives in Store, never here.
   sessionReport: { on: false, minutes: 3 },
   // Live dashboard (lean-live.js). The hub address and code are a secret and live in Store, never here.
-  // control: the dashboard may start and stop this character (off unless the player turns it on).
+  // control: the dashboard may start, stop and reload this character (off unless the player turns it on).
   live: { on: false, seconds: 10, control: false },
 };
 // The goals of one alchemy queue row: the single-item fields of DEFAULT_PROFILE.alchemy (target +, stones, white and blue

@@ -60,7 +60,7 @@ const raw = text => new Promise(done => {
   // Start / Stop: the same contract as worker/. Only characters that allow it, handed out once with the next report.
   const command = (body, headers = auth) => fetch(base + '/command', { method: 'POST', headers, body: JSON.stringify(body) });
   assert.equal((await command({ cmd: 'stop' }, {})).status, 401);
-  for (const bad of [{}, { cmd: 'reload' }, { cmd: 'stop', name: 7 }, { cmd: 'stop', name: 'x'.repeat(41) }]) assert.equal((await command(bad)).status, 400);
+  for (const bad of [{}, { cmd: 'jump' }, { cmd: 'stop', name: 7 }, { cmd: 'stop', name: 'x'.repeat(41) }]) assert.equal((await command(bad)).status, 400);
   assert.deepEqual(await (await command({ cmd: 'stop' })).json(), { sent: 0 }, 'Tester did not allow it');
   assert.equal((await post(JSON.stringify({ name: 'Tester', control: true }))).status, 204);
   assert.deepEqual(await (await command({ cmd: 'stop' })).json(), { sent: 1 });
@@ -69,5 +69,7 @@ const raw = text => new Promise(done => {
   assert.equal(answer.headers.get('access-control-allow-origin'), '*');
   assert.deepEqual(await answer.json(), { cmd: 'stop' });
   assert.equal((await post(JSON.stringify({ name: 'Tester', control: true }))).status, 204, 'handed out once');
+  assert.deepEqual(await (await command({ cmd: 'reload' })).json(), { sent: 1 }, 'Reload: for a page a game server restart left behind');
+  assert.deepEqual(await (await post(JSON.stringify({ name: 'Tester', control: true, inWorld: false }))).json(), { cmd: 'reload' });
   console.log('ok');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => hub.kill());
